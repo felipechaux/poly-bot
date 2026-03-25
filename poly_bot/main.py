@@ -22,6 +22,9 @@ from rich.live import Live
 from rich.table import Table
 from rich import print as rprint
 
+from dotenv import load_dotenv
+load_dotenv()  # loads .env into os.environ before anything else
+
 from poly_bot.observability.logging import setup_logging
 
 app = typer.Typer(

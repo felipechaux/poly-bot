@@ -116,6 +116,7 @@ class PositionTracker:
 
         # Realize P&L
         realized = (fill.price - pos.avg_cost_basis) * fill.size - fill.fee_usdc
+        fill.realized_pnl = realized  # Store on fill for DB persistence
         self._total_realized_pnl += realized
         self._trade_count += 1
 

@@ -88,6 +88,12 @@ class Bot:
         # Strategies
         self._strategies = load_strategies(settings.strategies)
 
+        # Wire agent event callback for AI research strategy
+        from poly_bot.strategies.ai_research import AIResearchStrategy
+        for s in self._strategies:
+            if isinstance(s, AIResearchStrategy):
+                s.on_agent_event(self._on_agent_event)
+
         # Feed
         feed_cfg = settings.feed
         self._feed = MarketDataFeed(
@@ -134,6 +140,7 @@ class Bot:
             await asyncio.gather(
                 self._feed.run(),
                 self._consume_updates(),
+                self._snapshot_loop(),
             )
         finally:
             await self._shutdown()
@@ -257,6 +264,16 @@ class Bot:
             fills=len(report.fills),
         )
 
+    def _on_agent_event(self, event: dict) -> None:
+        """Callback from AI strategy on every research/signal/skip event."""
+        if self._store:
+            asyncio.create_task(self._store.save_agent_event(event))
+        try:
+            from poly_bot.web.api import broadcast_agent_event
+            asyncio.create_task(broadcast_agent_event(event))
+        except Exception:
+            pass
+
     def _on_fill(self, fill: Fill) -> None:
         """Callback from executor on every fill."""
         self._portfolio.on_fill(fill)
@@ -296,6 +313,30 @@ class Bot:
             }))
         except Exception:
             pass
+
+    async def _snapshot_loop(self, interval_seconds: float = 300.0) -> None:
+        """Save a portfolio snapshot every 5 minutes and push to dashboard."""
+        while self._running:
+            await asyncio.sleep(interval_seconds)
+            if not self._running:
+                break
+            snap = self._portfolio.snapshot()
+            if self._store:
+                await self._store.save_snapshot(snap)
+            try:
+                from poly_bot.web.api import broadcast_equity_point
+                asyncio.create_task(broadcast_equity_point({
+                    "taken_at": snap.taken_at.isoformat(),
+                    "total_value": snap.total_value,
+                    "cash_usdc": snap.cash_usdc,
+                    "realized_pnl": snap.total_realized_pnl,
+                    "unrealized_pnl": snap.total_unrealized_pnl,
+                    "trade_count": snap.trade_count,
+                    "fees_paid": snap.total_fees_paid,
+                }))
+            except Exception:
+                pass
+            log.info("bot.snapshot_saved", total_value=snap.total_value)
 
     async def _shutdown(self) -> None:
         for s in self._strategies:

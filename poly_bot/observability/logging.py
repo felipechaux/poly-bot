@@ -23,7 +23,6 @@ def setup_logging(
 
     shared_processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
-        structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
@@ -35,21 +34,21 @@ def setup_logging(
             structlog.processors.dict_tracebacks,
             structlog.processors.JSONRenderer(),
         ]
-        handler = logging.StreamHandler(sys.stdout)
     else:
         processors = [
             *shared_processors,
             structlog.dev.ConsoleRenderer(colors=True),
         ]
-        handler = logging.StreamHandler(sys.stderr)
 
     structlog.configure(
         processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(),
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
+
+    handler = logging.StreamHandler(sys.stdout)
 
     # Also configure stdlib so third-party libs log through structlog
     logging.basicConfig(

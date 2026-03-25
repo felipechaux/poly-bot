@@ -21,7 +21,7 @@ risk:
 
 # --- Paper Trading ---
 paper:
-  initial_balance_usdc: 10000.0
+  initial_balance_usdc: 5000.0
   fill_mode: "order_book"         # "instant" | "order_book"
   simulated_latency_ms: 200       # Simulated fill latency
 
@@ -42,6 +42,25 @@ strategies:
       # Close position when price reverts past this point
       exit_threshold: 0.15        # Relative to entry side
       position_size_usdc: 100.0
+
+  ai_research:
+    enabled: true
+    params:
+      # Gemini model to use (gemini-1.5-flash free tier: 1,500 req/day)
+      # Options: gemini-1.5-flash | gemini-2.0-flash | gemini-1.5-pro
+      model: "gemini-1.5-flash"
+      # Minimum gap between Claude's estimate and market price to enter a trade
+      min_edge_pct: 0.10          # 10% edge required (e.g. Claude thinks 65%, market says 52%)
+      # Minimum confidence level: low | medium | high | very_high
+      min_confidence: "high"
+      # USDC per trade
+      position_size_usdc: 150.0
+      # How often to re-research each market (minutes)
+      research_interval_min: 20.0
+      # Max markets to research per feed cycle (cost control)
+      max_markets_per_cycle: 3
+      # Only research markets above this liquidity (USDC)
+      min_research_liquidity: 10000.0
 
   momentum:
     enabled: false

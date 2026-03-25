@@ -41,6 +41,7 @@ class Fill(BaseModel):
     size: float  # Shares filled
     cost_usdc: float  # USDC spent/received
     fee_usdc: float = 0.0
+    realized_pnl: float | None = None  # Set on SELL fills
     strategy: str = ""
     filled_at: datetime = Field(default_factory=datetime.utcnow)
     is_paper: bool = True

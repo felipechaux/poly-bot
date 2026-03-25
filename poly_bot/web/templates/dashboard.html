@@ -20,6 +20,7 @@
       --blue: #58a6ff;
       --yellow: #d29922;
       --purple: #bc8cff;
+      --orange: #e3b341;
     }
 
     body {
@@ -46,9 +47,7 @@
       border-radius: 50%; background: var(--muted); margin-right: 6px;
     }
     .status-dot.live { background: var(--green); animation: pulse 2s infinite; }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; } 50% { opacity: 0.4; }
-    }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
     .badge {
       padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600;
       text-transform: uppercase; letter-spacing: 0.5px;
@@ -59,17 +58,24 @@
     /* ── Layout ── */
     main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
 
-    .grid-4 {
-      display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
+    .grid-5 {
+      display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px;
       margin-bottom: 20px;
     }
     .grid-2 {
       display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
       margin-bottom: 20px;
     }
-    @media (max-width: 900px) {
-      .grid-4 { grid-template-columns: repeat(2, 1fr); }
-      .grid-2 { grid-template-columns: 1fr; }
+    .grid-3 {
+      display: grid; grid-template-columns: 2fr 1fr; gap: 16px;
+      margin-bottom: 20px;
+    }
+    @media (max-width: 1100px) {
+      .grid-5 { grid-template-columns: repeat(3, 1fr); }
+      .grid-3, .grid-2 { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 640px) {
+      .grid-5 { grid-template-columns: repeat(2, 1fr); }
     }
 
     /* ── Cards ── */
@@ -87,15 +93,14 @@
       font-size: 24px; font-weight: 700; line-height: 1.2;
     }
     .metric-sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
-    .positive { color: var(--green); }
-    .negative { color: var(--red); }
-    .neutral  { color: var(--text); }
+    .positive { color: var(--green) !important; }
+    .negative { color: var(--red) !important; }
+    .neutral  { color: var(--text) !important; }
+    .warning  { color: var(--yellow) !important; }
 
     /* ── Table ── */
     .table-wrap { overflow-x: auto; }
-    table {
-      width: 100%; border-collapse: collapse; font-size: 13px;
-    }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
     thead th {
       text-align: left; padding: 8px 12px;
       font-size: 11px; font-weight: 600; text-transform: uppercase;
@@ -113,8 +118,18 @@
     .tag.buy  { background: #0d2d0d; color: var(--green); }
     .tag.sell { background: #2d0d0d; color: var(--red);   }
 
-    /* ── Chart ── */
-    .chart-wrap { position: relative; height: 200px; }
+    /* ── Charts ── */
+    .chart-wrap { position: relative; height: 260px; }
+    .chart-wrap-sm { position: relative; height: 160px; }
+
+    /* ── Section title ── */
+    .section-title {
+      font-size: 13px; font-weight: 600; color: var(--muted);
+      margin-bottom: 12px; padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .section-title span { font-weight: 400; font-size: 12px; color: var(--muted); }
 
     /* ── Toast ── */
     #toasts {
@@ -131,17 +146,22 @@
     .toast.fill-sell { border-left-color: var(--red); }
     @keyframes slideIn {
       from { transform: translateX(20px); opacity: 0; }
-      to   { transform: translateX(0);   opacity: 1; }
+      to   { transform: translateX(0); opacity: 1; }
     }
 
-    /* ── Misc ── */
-    .section-title {
-      font-size: 13px; font-weight: 600; color: var(--muted);
-      margin-bottom: 12px; padding-bottom: 8px;
-      border-bottom: 1px solid var(--border);
-    }
     .empty { color: var(--muted); padding: 24px; text-align: center; }
     #ws-status { font-size: 12px; color: var(--muted); }
+
+    /* ── Tabs ── */
+    .tabs { display:flex; gap:0; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
+    .tab {
+      padding: 6px 14px; font-size: 13px; cursor: pointer;
+      color: var(--muted); border-bottom: 2px solid transparent;
+      margin-bottom: -1px; transition: color 0.15s;
+    }
+    .tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
   </style>
 </head>
 <body>
@@ -159,12 +179,12 @@
 
 <main>
 
-  <!-- KPI row -->
-  <div class="grid-4">
+  <!-- KPI row: 5 metrics -->
+  <div class="grid-5">
     <div class="card">
       <div class="card-title">Total Value</div>
       <div class="metric-value neutral" id="total-value">$—</div>
-      <div class="metric-sub" id="total-value-sub">cash + positions</div>
+      <div class="metric-sub">cash + positions</div>
     </div>
     <div class="card">
       <div class="card-title">Total P&amp;L</div>
@@ -173,6 +193,11 @@
         <span id="realized-pnl">—</span> realized ·
         <span id="unrealized-pnl">—</span> open
       </div>
+    </div>
+    <div class="card">
+      <div class="card-title">ROI</div>
+      <div class="metric-value neutral" id="roi-pct">—</div>
+      <div class="metric-sub" id="roi-sub">since start</div>
     </div>
     <div class="card">
       <div class="card-title">Win Rate</div>
@@ -186,12 +211,62 @@
     </div>
   </div>
 
-  <!-- Chart + Positions -->
+  <!-- Risk metrics row -->
+  <div class="grid-5" style="margin-bottom:20px;">
+    <div class="card">
+      <div class="card-title">Max Drawdown</div>
+      <div class="metric-value neutral" id="max-drawdown">—</div>
+      <div class="metric-sub">from peak</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Sharpe Ratio</div>
+      <div class="metric-value neutral" id="sharpe">—</div>
+      <div class="metric-sub">risk-adjusted return</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Fees Paid</div>
+      <div class="metric-value neutral" id="fees-paid">$—</div>
+      <div class="metric-sub">total trading costs</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Open Positions</div>
+      <div class="metric-value neutral" id="open-positions">0</div>
+      <div class="metric-sub" id="positions-exposure">$0 exposure</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Strategies</div>
+      <div class="metric-value neutral" id="strategy-count">—</div>
+      <div class="metric-sub">active</div>
+    </div>
+  </div>
+
+  <!-- Equity Curve (full width) -->
+  <div class="card" style="margin-bottom:20px;">
+    <div class="section-title">
+      Equity Curve
+      <span id="equity-points">0 data points</span>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="equity-chart"></canvas>
+    </div>
+  </div>
+
+  <!-- Strategy breakdown + Open Positions -->
   <div class="grid-2">
     <div class="card">
-      <div class="section-title">Portfolio Value Over Time</div>
-      <div class="chart-wrap">
-        <canvas id="pnl-chart"></canvas>
+      <div class="section-title">Strategy Performance</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Strategy</th><th>Trades</th><th>Win Rate</th>
+              <th>Realized P&amp;L</th><th>Volume</th><th>Fees</th>
+            </tr>
+          </thead>
+          <tbody id="strategy-body">
+            <tr><td colspan="6" class="empty">No strategy data yet</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
     <div class="card">
@@ -201,7 +276,7 @@
           <thead>
             <tr>
               <th>Token</th><th>Side</th><th>Shares</th>
-              <th>Avg Cost</th><th>Value</th><th>Strategy</th>
+              <th>Avg Cost</th><th>Cost</th><th>Strategy</th>
             </tr>
           </thead>
           <tbody id="positions-body">
@@ -212,8 +287,36 @@
     </div>
   </div>
 
+  <!-- Agent Activity -->
+  <div class="card" style="margin-bottom:20px;">
+    <div class="section-title">
+      Agent Activity
+      <span id="agent-count">0 events</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Event</th>
+            <th>Market Question</th>
+            <th>AI Estimate</th>
+            <th>Market Price</th>
+            <th>Edge</th>
+            <th>Confidence</th>
+            <th>Decision</th>
+            <th>Reasoning</th>
+          </tr>
+        </thead>
+        <tbody id="agent-body">
+          <tr><td colspan="9" class="empty">No agent activity yet — waiting for first research cycle</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- Recent Trades -->
-  <div class="card">
+  <div class="card" style="margin-bottom:20px;">
     <div class="section-title">Recent Trades</div>
     <div class="table-wrap">
       <table>
@@ -221,11 +324,11 @@
           <tr>
             <th>Time</th><th>Token</th><th>Side</th>
             <th>Price</th><th>Shares</th><th>Cost (USDC)</th>
-            <th>Strategy</th><th>Mode</th>
+            <th>Realized P&amp;L</th><th>Strategy</th><th>Mode</th>
           </tr>
         </thead>
         <tbody id="trades-body">
-          <tr><td colspan="8" class="empty">No trades yet</td></tr>
+          <tr><td colspan="9" class="empty">No trades yet</td></tr>
         </tbody>
       </table>
     </div>
@@ -236,112 +339,286 @@
 <div id="toasts"></div>
 
 <script>
-// ── Chart setup ──────────────────────────────────────────────────────────────
-const ctx = document.getElementById('pnl-chart').getContext('2d');
-const pnlChart = new Chart(ctx, {
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const el = id => document.getElementById(id);
+const fmt$ = v => '$' + parseFloat(v || 0).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+const fmtPnl = v => {
+  const n = parseFloat(v || 0);
+  return (n >= 0 ? '+' : '') + fmt$(n);
+};
+function pnlClass(v) {
+  const n = parseFloat(v || 0);
+  return n > 0.001 ? 'positive' : n < -0.001 ? 'negative' : 'neutral';
+}
+function fmtPct(v) {
+  const n = parseFloat(v || 0);
+  return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+}
+
+// ── Equity Chart ──────────────────────────────────────────────────────────────
+const equityCtx = el('equity-chart').getContext('2d');
+const equityChart = new Chart(equityCtx, {
   type: 'line',
   data: {
     labels: [],
-    datasets: [{
-      label: 'Total Value (USDC)',
-      data: [],
-      borderColor: '#58a6ff',
-      backgroundColor: 'rgba(88,166,255,0.08)',
-      borderWidth: 2,
-      pointRadius: 0,
-      tension: 0.3,
-      fill: true,
-    }]
+    datasets: [
+      {
+        label: 'Total Value (USDC)',
+        data: [],
+        borderColor: '#58a6ff',
+        backgroundColor: 'rgba(88,166,255,0.08)',
+        borderWidth: 2,
+        pointRadius: 0,
+        tension: 0.3,
+        fill: true,
+        yAxisID: 'y',
+      },
+      {
+        label: 'Realized P&L',
+        data: [],
+        borderColor: '#3fb950',
+        backgroundColor: 'transparent',
+        borderWidth: 1.5,
+        pointRadius: 0,
+        tension: 0.3,
+        borderDash: [4, 3],
+        fill: false,
+        yAxisID: 'y2',
+      }
+    ]
   },
   options: {
     responsive: true,
     maintainAspectRatio: false,
     animation: false,
-    plugins: { legend: { display: false } },
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: {
+        display: true,
+        labels: { color: '#8b949e', font: { size: 11 } }
+      },
+      tooltip: {
+        backgroundColor: '#21262d',
+        borderColor: '#30363d',
+        borderWidth: 1,
+        titleColor: '#e6edf3',
+        bodyColor: '#8b949e',
+        callbacks: {
+          label: ctx => ctx.dataset.label + ': $' + parseFloat(ctx.parsed.y).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}),
+        }
+      }
+    },
     scales: {
       x: {
-        ticks: { color: '#8b949e', maxTicksLimit: 6 },
-        grid: { color: '#21262d' },
+        ticks: { color: '#8b949e', maxTicksLimit: 8, font: { size: 11 } },
+        grid: { color: '#1e2530' },
       },
       y: {
-        ticks: { color: '#8b949e', callback: v => '$' + v.toLocaleString() },
-        grid: { color: '#21262d' },
+        position: 'left',
+        ticks: { color: '#8b949e', callback: v => '$' + (v/1000).toFixed(1)+'k', font:{size:11} },
+        grid: { color: '#1e2530' },
+      },
+      y2: {
+        position: 'right',
+        ticks: { color: '#3fb950', callback: v => fmtPnl(v), font:{size:11} },
+        grid: { drawOnChartArea: false },
       }
     }
   }
 });
 
-const MAX_CHART_POINTS = 120;
+function setEquityHistory(history) {
+  if (!history || !history.length) return;
+  equityChart.data.labels = history.map(h => {
+    const d = new Date(h.taken_at);
+    return d.toLocaleDateString('en-US', {month:'short', day:'numeric'}) + ' ' + d.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit'});
+  });
+  equityChart.data.datasets[0].data = history.map(h => h.total_value);
+  equityChart.data.datasets[1].data = history.map(h => h.realized_pnl);
+  equityChart.update('none');
+  el('equity-points').textContent = history.length + ' data points';
+}
 
-function pushChartPoint(value) {
-  const now = new Date().toLocaleTimeString();
-  pnlChart.data.labels.push(now);
-  pnlChart.data.datasets[0].data.push(value);
-  if (pnlChart.data.labels.length > MAX_CHART_POINTS) {
-    pnlChart.data.labels.shift();
-    pnlChart.data.datasets[0].data.shift();
+function pushEquityPoint(pt) {
+  const d = new Date(pt.taken_at);
+  const label = d.toLocaleDateString('en-US', {month:'short', day:'numeric'}) + ' ' + d.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit'});
+  equityChart.data.labels.push(label);
+  equityChart.data.datasets[0].data.push(pt.total_value);
+  equityChart.data.datasets[1].data.push(pt.realized_pnl);
+  const MAX = 500;
+  if (equityChart.data.labels.length > MAX) {
+    equityChart.data.labels.shift();
+    equityChart.data.datasets[0].data.shift();
+    equityChart.data.datasets[1].data.shift();
   }
-  pnlChart.update('none');
+  equityChart.update('none');
+  el('equity-points').textContent = equityChart.data.labels.length + ' data points';
 }
 
-// ── Formatting helpers ───────────────────────────────────────────────────────
-const fmt$ = v => '$' + parseFloat(v).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
-const fmtPnl = v => {
-  const n = parseFloat(v);
-  return (n >= 0 ? '+' : '') + fmt$(n);
-};
-function pnlClass(v) {
-  const n = parseFloat(v);
-  return n > 0 ? 'positive' : n < 0 ? 'negative' : 'neutral';
-}
-
-// ── Portfolio update ─────────────────────────────────────────────────────────
+// ── Portfolio update ──────────────────────────────────────────────────────────
 function applyPortfolio(d) {
   if (!d || !Object.keys(d).length) return;
 
   const tv = d.total_value ?? 0;
   el('total-value').textContent = fmt$(tv);
-  el('total-value').className = 'metric-value neutral';
 
   const tp = d.total_pnl ?? 0;
   el('total-pnl').textContent = fmtPnl(tp);
   el('total-pnl').className = 'metric-value ' + pnlClass(tp);
 
   el('realized-pnl').textContent = fmtPnl(d.realized_pnl ?? 0);
+  el('realized-pnl').className = pnlClass(d.realized_pnl);
   el('unrealized-pnl').textContent = fmtPnl(d.unrealized_pnl ?? 0);
+  el('unrealized-pnl').className = pnlClass(d.unrealized_pnl);
 
   const wr = (d.win_rate ?? 0) * 100;
   el('win-rate').textContent = wr.toFixed(1) + '%';
-  el('win-rate').className = 'metric-value ' + (wr >= 50 ? 'positive' : wr > 0 ? 'negative' : 'neutral');
+  el('win-rate').className = 'metric-value ' + (wr >= 50 ? 'positive' : wr > 0 ? 'warning' : 'neutral');
 
   el('trade-count').textContent = `${d.trade_count ?? 0} trades (${d.win_count ?? 0}W / ${d.loss_count ?? 0}L)`;
   el('cash').textContent = fmt$(d.cash_usdc ?? 0);
-  el('positions-value').textContent = fmt$(d.total_position_value ?? 0) + ' in positions';
 
-  pushChartPoint(tv);
+  const posVal = d.total_position_value ?? 0;
+  el('positions-value').textContent = fmt$(posVal) + ' in positions';
+  el('fees-paid').textContent = fmt$(d.fees_paid ?? 0);
+  el('fees-paid').className = 'metric-value ' + (d.fees_paid > 0 ? 'warning' : 'neutral');
+
   el('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
 }
 
-// ── Positions update ─────────────────────────────────────────────────────────
+// ── Stats (ROI, drawdown, Sharpe) ─────────────────────────────────────────────
+function applyStats(s) {
+  if (!s) return;
+
+  const roi = s.roi_pct ?? 0;
+  el('roi-pct').textContent = fmtPct(roi);
+  el('roi-pct').className = 'metric-value ' + pnlClass(roi);
+
+  const dd = s.max_drawdown_pct ?? 0;
+  el('max-drawdown').textContent = dd.toFixed(2) + '%';
+  el('max-drawdown').className = 'metric-value ' + (dd > 10 ? 'negative' : dd > 5 ? 'warning' : 'positive');
+
+  const sh = s.sharpe_ratio ?? 0;
+  el('sharpe').textContent = sh.toFixed(3);
+  el('sharpe').className = 'metric-value ' + (sh > 1 ? 'positive' : sh > 0 ? 'neutral' : 'negative');
+
+  if (s.strategies) applyStrategyStats(s.strategies);
+}
+
+// ── Strategy table ────────────────────────────────────────────────────────────
+function applyStrategyStats(strategies) {
+  const tbody = el('strategy-body');
+  if (!strategies || !strategies.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">No strategy data yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = strategies.map(s => {
+    const wr = ((s.win_rate ?? 0) * 100).toFixed(1);
+    const pnl = s.realized_pnl ?? 0;
+    return `
+    <tr>
+      <td style="font-weight:600;color:var(--blue)">${s.strategy || '—'}</td>
+      <td>${s.total_trades ?? 0} <span style="color:var(--muted);font-size:11px">(${s.closed_trades ?? 0} closed)</span></td>
+      <td class="${parseFloat(wr) >= 50 ? 'positive' : 'warning'}">${wr}%</td>
+      <td class="${pnlClass(pnl)}">${fmtPnl(pnl)}</td>
+      <td style="color:var(--muted)">${fmt$(s.total_volume ?? 0)}</td>
+      <td style="color:var(--yellow)">${fmt$(s.total_fees ?? 0)}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Positions ─────────────────────────────────────────────────────────────────
 function applyPositions(positions) {
   const tbody = el('positions-body');
+  el('open-positions').textContent = positions ? positions.length : 0;
+  const exposure = positions ? positions.reduce((a, p) => a + (p.total_cost_usdc || 0), 0) : 0;
+  el('positions-exposure').textContent = fmt$(exposure) + ' exposure';
+
   if (!positions || !positions.length) {
     tbody.innerHTML = '<tr><td colspan="6" class="empty">No open positions</td></tr>';
     return;
   }
   tbody.innerHTML = positions.map(p => `
     <tr>
-      <td style="font-family:monospace;font-size:12px">${p.token_id.slice(0,14)}…</td>
-      <td><span class="tag ${p.side.toLowerCase()}">${p.side}</span></td>
-      <td>${p.shares.toFixed(2)}</td>
-      <td>${p.avg_cost.toFixed(4)}</td>
-      <td>${fmt$(p.total_cost_usdc)}</td>
-      <td style="color:var(--muted)">${p.strategy}</td>
+      <td style="font-family:monospace;font-size:12px">${(p.token_id||'').slice(0,14)}…</td>
+      <td><span class="tag ${(p.side||'').toLowerCase()}">${p.side}</span></td>
+      <td>${parseFloat(p.shares||0).toFixed(2)}</td>
+      <td>${parseFloat(p.avg_cost||0).toFixed(4)}</td>
+      <td>${fmt$(p.total_cost_usdc||0)}</td>
+      <td style="color:var(--muted)">${p.strategy||''}</td>
     </tr>
   `).join('');
 }
 
-// ── Fill toast + trades table ────────────────────────────────────────────────
+// ── Agent Activity ────────────────────────────────────────────────────────────
+const agentBuffer = [];
+
+const DECISION_LABELS = {
+  BUY_YES:   { label: '🟢 BUY YES',  cls: 'positive' },
+  BUY_NO:    { label: '🔴 BUY NO',   cls: 'negative' },
+  EXIT:      { label: '🔵 EXIT',     cls: 'neutral'  },
+  SKIP_EDGE: { label: '⏭ Skip',     cls: 'warning'  },
+  SKIP_CONF: { label: '⏭ Skip',     cls: 'warning'  },
+};
+const EVENT_LABELS = {
+  research: { label: '🔍 Research', cls: 'color:var(--blue)'   },
+  signal:   { label: '⚡ Signal',   cls: 'color:var(--green)'  },
+  skip:     { label: '⏭ Skip',     cls: 'color:var(--muted)'  },
+};
+
+function setAgentHistory(events) {
+  agentBuffer.length = 0;
+  agentBuffer.push(...events);
+  renderAgentEvents();
+}
+
+function pushAgentEvent(ev) {
+  agentBuffer.unshift(ev);
+  if (agentBuffer.length > 200) agentBuffer.pop();
+  renderAgentEvents();
+}
+
+function renderAgentEvents() {
+  const tbody = el('agent-body');
+  el('agent-count').textContent = agentBuffer.length + ' events';
+
+  if (!agentBuffer.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">No agent activity yet — waiting for first research cycle</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = agentBuffer.slice(0, 100).map(ev => {
+    const eLabel = EVENT_LABELS[ev.event_type] || { label: ev.event_type, cls: '' };
+    const dInfo  = DECISION_LABELS[ev.decision] || null;
+    const geminiP = ev.gemini_p != null ? (parseFloat(ev.gemini_p)*100).toFixed(1)+'%' : '—';
+    const marketP = ev.market_p != null ? (parseFloat(ev.market_p)*100).toFixed(1)+'%' : '—';
+    const edge    = ev.edge    != null ? fmtPct(parseFloat(ev.edge)*100) : '—';
+    const edgeCls = ev.edge    != null ? pnlClass(parseFloat(ev.edge)*100) : '';
+    const conf    = ev.confidence || '—';
+    const confCls = conf === 'very_high' ? 'positive' : conf === 'high' ? 'positive' : conf === 'medium' ? 'warning' : 'muted';
+    const question = (ev.question || '').length > 60
+      ? (ev.question || '').slice(0, 60) + '…'
+      : (ev.question || '—');
+    const reasoning = (ev.reasoning || '').length > 80
+      ? (ev.reasoning || '').slice(0, 80) + '…'
+      : (ev.reasoning || '—');
+    const timeStr = (ev.occurred_at || '').slice(0, 19).replace('T', ' ');
+
+    return `<tr>
+      <td style="color:var(--muted);font-size:12px;white-space:nowrap">${timeStr}</td>
+      <td style="${eLabel.cls};font-size:12px;white-space:nowrap">${eLabel.label}</td>
+      <td style="font-size:12px;max-width:220px" title="${ev.question || ''}">${question}</td>
+      <td style="font-weight:600;color:var(--blue)">${geminiP}</td>
+      <td style="color:var(--muted)">${marketP}</td>
+      <td class="${edgeCls}" style="font-weight:600">${edge}</td>
+      <td class="${confCls}" style="font-size:12px">${conf}</td>
+      <td style="white-space:nowrap">${dInfo ? `<span class="${dInfo.cls}">${dInfo.label}</span>` : '<span style="color:var(--muted)">—</span>'}</td>
+      <td style="color:var(--muted);font-size:12px;max-width:260px" title="${ev.reasoning || ''}">${reasoning}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Fill toast + trades table ─────────────────────────────────────────────────
 const tradesBuffer = [];
 
 function showFillToast(fill) {
@@ -349,41 +626,45 @@ function showFillToast(fill) {
   const div = document.createElement('div');
   div.className = 'toast' + (isBuy ? '' : ' fill-sell');
   div.innerHTML = `
-    <strong>${fill.side}</strong> ${parseFloat(fill.size).toFixed(2)} shares
-    @ ${parseFloat(fill.price).toFixed(4)} · <em>${fill.strategy}</em>
-    · cost ${fmt$(fill.cost_usdc)}
+    <strong>${fill.side}</strong> ${parseFloat(fill.size||0).toFixed(2)} shares
+    @ ${parseFloat(fill.price||0).toFixed(4)} · <em>${fill.strategy||''}</em>
+    · cost ${fmt$(fill.cost_usdc||0)}
   `;
   el('toasts').appendChild(div);
-  setTimeout(() => div.remove(), 5000);
+  setTimeout(() => div.remove(), 6000);
 
   tradesBuffer.unshift(fill);
-  if (tradesBuffer.length > 50) tradesBuffer.pop();
+  if (tradesBuffer.length > 100) tradesBuffer.pop();
   renderTrades();
 }
 
 function renderTrades() {
   const tbody = el('trades-body');
   if (!tradesBuffer.length) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">No trades yet</td></tr>';
     return;
   }
-  tbody.innerHTML = tradesBuffer.map(t => `
+  tbody.innerHTML = tradesBuffer.slice(0, 50).map(t => {
+    const rp = t.realized_pnl;
+    const rpCell = rp != null
+      ? `<td class="${pnlClass(rp)}">${fmtPnl(rp)}</td>`
+      : `<td style="color:var(--muted)">—</td>`;
+    return `
     <tr>
-      <td style="color:var(--muted);white-space:nowrap">${(t.filled_at||'').slice(0,19)}</td>
+      <td style="color:var(--muted);white-space:nowrap;font-size:12px">${(t.filled_at||'').slice(0,19)}</td>
       <td style="font-family:monospace;font-size:12px">${(t.token_id||'').slice(0,14)}…</td>
-      <td><span class="tag ${(t.side||'').toLowerCase()}">${t.side}</span></td>
+      <td><span class="tag ${(t.side||'').toLowerCase()}">${t.side||''}</span></td>
       <td>${parseFloat(t.price||0).toFixed(4)}</td>
       <td>${parseFloat(t.size||0).toFixed(2)}</td>
       <td>${fmt$(t.cost_usdc||0)}</td>
+      ${rpCell}
       <td style="color:var(--muted)">${t.strategy||''}</td>
       <td style="color:var(--muted);font-size:11px">${t.is_paper ? 'paper' : '🔴 LIVE'}</td>
-    </tr>
-  `).join('');
+    </tr>`;
+  }).join('');
 }
 
-// ── WebSocket ────────────────────────────────────────────────────────────────
-function el(id) { return document.getElementById(id); }
-
+// ── WebSocket ─────────────────────────────────────────────────────────────────
 let ws, pingInterval;
 
 function connect() {
@@ -394,15 +675,22 @@ function connect() {
     el('dot').className = 'status-dot live';
     el('ws-status').innerHTML = '<span class="status-dot live"></span>live';
     pingInterval = setInterval(() => ws.readyState === 1 && ws.send('ping'), 25000);
-    loadInitialTrades();
+    loadInitialData();
   };
 
   ws.onmessage = e => {
     try {
       const msg = JSON.parse(e.data);
-      if (msg.type === 'portfolio') applyPortfolio(msg.data);
-      if (msg.type === 'positions') applyPositions(msg.data);
-      if (msg.type === 'fill')      showFillToast(msg.data);
+      switch (msg.type) {
+        case 'portfolio':       applyPortfolio(msg.data); break;
+        case 'positions':       applyPositions(msg.data); break;
+        case 'fill':            showFillToast(msg.data); break;
+        case 'equity_history':  setEquityHistory(msg.data); break;
+        case 'equity_point':    pushEquityPoint(msg.data); break;
+        case 'strategy_stats':  applyStrategyStats(msg.data); break;
+        case 'agent_history':   setAgentHistory(msg.data); break;
+        case 'agent_event':     pushAgentEvent(msg.data); break;
+      }
     } catch {}
   };
 
@@ -414,23 +702,33 @@ function connect() {
   };
 }
 
-async function loadInitialTrades() {
+async function loadInitialData() {
+  // Load recent trades from DB
   try {
-    const r = await fetch('/api/trades?limit=20');
+    const r = await fetch('/api/trades?limit=50');
     const data = await r.json();
-    if (data.trades) {
+    if (data.trades && data.trades.length) {
       tradesBuffer.push(...data.trades);
       renderTrades();
     }
   } catch {}
 
-  // Also load status for mode badge
+  // Load status badge
   try {
     const r = await fetch('/api/status');
     const data = await r.json();
     const badge = el('mode-badge');
     badge.textContent = data.mode;
     badge.className = 'badge ' + (data.mode === 'live' ? 'live' : 'paper');
+    el('strategy-count').textContent = (data.strategies || []).join(', ') || '—';
+    el('strategy-count').style.fontSize = data.strategies?.length > 1 ? '14px' : '24px';
+  } catch {}
+
+  // Load stats (ROI, drawdown, Sharpe, strategy breakdown)
+  try {
+    const r = await fetch('/api/stats');
+    const data = await r.json();
+    applyStats(data);
   } catch {}
 }
 

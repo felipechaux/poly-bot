@@ -124,7 +124,7 @@ def create_app(bot_ref: list) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):
-        return templates.TemplateResponse("dashboard.html", {"request": request})
+        return templates.TemplateResponse(request, "dashboard.html")
 
     @app.get("/api/status")
     async def status():
@@ -178,6 +178,75 @@ def create_app(bot_ref: list) -> FastAPI:
             ]
         }
 
+    @app.get("/api/agent")
+    async def agent_events(limit: int = 100):
+        try:
+            from poly_bot.store.database import init_db
+            from poly_bot.store.trade_store import TradeStore
+            conn = await init_db()
+            store = TradeStore(conn)
+            events = await store.recent_agent_events(limit=limit)
+            await conn.close()
+            return {"events": events}
+        except Exception as exc:
+            return {"events": [], "error": str(exc)}
+
+    @app.get("/api/equity")
+    async def equity(limit: int = 500):
+        try:
+            from poly_bot.store.database import init_db
+            from poly_bot.store.trade_store import TradeStore
+            conn = await init_db()
+            store = TradeStore(conn)
+            history = await store.equity_history(limit=limit)
+            await conn.close()
+            return {"equity": history}
+        except Exception as exc:
+            return {"equity": [], "error": str(exc)}
+
+    @app.get("/api/stats")
+    async def stats():
+        try:
+            from poly_bot.store.database import init_db
+            from poly_bot.store.trade_store import TradeStore
+            conn = await init_db()
+            store = TradeStore(conn)
+            strategy_data = await store.strategy_stats()
+            history = await store.equity_history(limit=1000)
+            await conn.close()
+
+            # Compute max drawdown and ROI from equity history
+            max_drawdown = 0.0
+            roi_pct = 0.0
+            sharpe = 0.0
+            if history:
+                values = [h["total_value"] for h in history]
+                first_val = values[0]
+                roi_pct = round((values[-1] - first_val) / first_val * 100, 2) if first_val else 0.0
+                peak = values[0]
+                for v in values:
+                    if v > peak:
+                        peak = v
+                    dd = (peak - v) / peak if peak > 0 else 0.0
+                    if dd > max_drawdown:
+                        max_drawdown = dd
+
+                # Simple Sharpe: mean daily return / std (using snapshots as proxy)
+                if len(values) >= 2:
+                    import statistics
+                    returns = [(values[i] - values[i - 1]) / values[i - 1] for i in range(1, len(values)) if values[i - 1] > 0]
+                    if returns and statistics.stdev(returns) > 0:
+                        sharpe = round(statistics.mean(returns) / statistics.stdev(returns), 3)
+
+            return {
+                "roi_pct": roi_pct,
+                "max_drawdown_pct": round(max_drawdown * 100, 2),
+                "sharpe_ratio": sharpe,
+                "strategies": strategy_data,
+            }
+        except Exception as exc:
+            return {"roi_pct": 0, "max_drawdown_pct": 0, "sharpe_ratio": 0, "strategies": [], "error": str(exc)}
+
     @app.post("/api/bot/stop")
     async def stop_bot():
         bot = _get_bot()
@@ -201,6 +270,30 @@ def create_app(bot_ref: list) -> FastAPI:
                 "type": "positions",
                 "data": _positions_list(),
             }, default=str))
+            # Send equity history for chart bootstrap
+            try:
+                from poly_bot.store.database import init_db
+                from poly_bot.store.trade_store import TradeStore
+                _conn = await init_db()
+                _store = TradeStore(_conn)
+                _history = await _store.equity_history(limit=500)
+                _stats = await _store.strategy_stats()
+                await _conn.close()
+                await ws.send_text(json.dumps({
+                    "type": "equity_history",
+                    "data": _history,
+                }, default=str))
+                await ws.send_text(json.dumps({
+                    "type": "strategy_stats",
+                    "data": _stats,
+                }, default=str))
+                _agent_events = await _store.recent_agent_events(limit=100)
+                await ws.send_text(json.dumps({
+                    "type": "agent_history",
+                    "data": _agent_events,
+                }, default=str))
+            except Exception:
+                pass
 
             # Keep alive — client sends pings
             while True:
@@ -228,3 +321,13 @@ async def broadcast_fill(fill_data: dict[str, Any]) -> None:
 async def broadcast_portfolio(portfolio_data: dict[str, Any]) -> None:
     """Push portfolio update to all connected dashboard clients."""
     await manager.broadcast({"type": "portfolio", "data": portfolio_data})
+
+
+async def broadcast_agent_event(event: dict[str, Any]) -> None:
+    """Push a live agent activity event to all dashboard clients."""
+    await manager.broadcast({"type": "agent_event", "data": event})
+
+
+async def broadcast_equity_point(point: dict[str, Any]) -> None:
+    """Push a new equity snapshot point to dashboard clients for live chart updates."""
+    await manager.broadcast({"type": "equity_point", "data": point})
