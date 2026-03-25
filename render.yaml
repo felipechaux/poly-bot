@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: poly-bot
+    runtime: python
+    buildCommand: pip install uv && uv sync --frozen --no-dev
+    startCommand: uv run poly-bot run --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/status
+    autoDeploy: true
+    envVars:
+      - key: POLY_MODE
+        value: paper
+      - key: ENABLE_LIVE_TRADING
+        value: "false"
+      - key: LOG_FORMAT
+        value: json
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    disk:
+      name: bot-data
+      mountPath: /app/data
+      sizeGB: 1

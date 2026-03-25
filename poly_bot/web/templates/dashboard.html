@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Poly Bot Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface2: #21262d;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --green: #3fb950;
+      --red: #f85149;
+      --blue: #58a6ff;
+      --yellow: #d29922;
+      --purple: #bc8cff;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", monospace;
+      font-size: 14px;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky; top: 0; z-index: 100;
+    }
+    header h1 { font-size: 18px; font-weight: 600; color: var(--blue); }
+    .status-dot {
+      display: inline-block; width: 8px; height: 8px;
+      border-radius: 50%; background: var(--muted); margin-right: 6px;
+    }
+    .status-dot.live { background: var(--green); animation: pulse 2s infinite; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; } 50% { opacity: 0.4; }
+    }
+    .badge {
+      padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .badge.paper { background: #1c3a5e; color: var(--blue); }
+    .badge.live  { background: #3d1515; color: var(--red); }
+
+    /* ── Layout ── */
+    main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+
+    .grid-4 {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
+      margin-bottom: 20px;
+    }
+    .grid-2 {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+      margin-bottom: 20px;
+    }
+    @media (max-width: 900px) {
+      .grid-4 { grid-template-columns: repeat(2, 1fr); }
+      .grid-2 { grid-template-columns: 1fr; }
+    }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .card-title {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.8px; color: var(--muted); margin-bottom: 8px;
+    }
+    .metric-value {
+      font-size: 24px; font-weight: 700; line-height: 1.2;
+    }
+    .metric-sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .positive { color: var(--green); }
+    .negative { color: var(--red); }
+    .neutral  { color: var(--text); }
+
+    /* ── Table ── */
+    .table-wrap { overflow-x: auto; }
+    table {
+      width: 100%; border-collapse: collapse; font-size: 13px;
+    }
+    thead th {
+      text-align: left; padding: 8px 12px;
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.6px; color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+    tbody tr { border-bottom: 1px solid var(--border); }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: var(--surface2); }
+    td { padding: 8px 12px; }
+    .tag {
+      display: inline-block; padding: 1px 6px; border-radius: 4px;
+      font-size: 11px; font-weight: 600;
+    }
+    .tag.buy  { background: #0d2d0d; color: var(--green); }
+    .tag.sell { background: #2d0d0d; color: var(--red);   }
+
+    /* ── Chart ── */
+    .chart-wrap { position: relative; height: 200px; }
+
+    /* ── Toast ── */
+    #toasts {
+      position: fixed; bottom: 20px; right: 20px; z-index: 999;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .toast {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-left: 3px solid var(--green);
+      padding: 10px 14px; border-radius: 6px;
+      font-size: 13px; min-width: 280px;
+      animation: slideIn 0.2s ease;
+    }
+    .toast.fill-sell { border-left-color: var(--red); }
+    @keyframes slideIn {
+      from { transform: translateX(20px); opacity: 0; }
+      to   { transform: translateX(0);   opacity: 1; }
+    }
+
+    /* ── Misc ── */
+    .section-title {
+      font-size: 13px; font-weight: 600; color: var(--muted);
+      margin-bottom: 12px; padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .empty { color: var(--muted); padding: 24px; text-align: center; }
+    #ws-status { font-size: 12px; color: var(--muted); }
+  </style>
+</head>
+<body>
+
+<header>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <h1>⚡ Poly Bot</h1>
+    <span id="mode-badge" class="badge paper">paper</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:16px;">
+    <span id="ws-status"><span class="status-dot" id="dot"></span>connecting…</span>
+    <span id="last-update" style="font-size:12px;color:var(--muted)"></span>
+  </div>
+</header>
+
+<main>
+
+  <!-- KPI row -->
+  <div class="grid-4">
+    <div class="card">
+      <div class="card-title">Total Value</div>
+      <div class="metric-value neutral" id="total-value">$—</div>
+      <div class="metric-sub" id="total-value-sub">cash + positions</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Total P&amp;L</div>
+      <div class="metric-value neutral" id="total-pnl">$—</div>
+      <div class="metric-sub">
+        <span id="realized-pnl">—</span> realized ·
+        <span id="unrealized-pnl">—</span> open
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Win Rate</div>
+      <div class="metric-value neutral" id="win-rate">—</div>
+      <div class="metric-sub" id="trade-count">0 trades</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Cash Available</div>
+      <div class="metric-value neutral" id="cash">$—</div>
+      <div class="metric-sub" id="positions-value">$— in positions</div>
+    </div>
+  </div>
+
+  <!-- Chart + Positions -->
+  <div class="grid-2">
+    <div class="card">
+      <div class="section-title">Portfolio Value Over Time</div>
+      <div class="chart-wrap">
+        <canvas id="pnl-chart"></canvas>
+      </div>
+    </div>
+    <div class="card">
+      <div class="section-title">Open Positions</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Token</th><th>Side</th><th>Shares</th>
+              <th>Avg Cost</th><th>Value</th><th>Strategy</th>
+            </tr>
+          </thead>
+          <tbody id="positions-body">
+            <tr><td colspan="6" class="empty">No open positions</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Recent Trades -->
+  <div class="card">
+    <div class="section-title">Recent Trades</div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th><th>Token</th><th>Side</th>
+            <th>Price</th><th>Shares</th><th>Cost (USDC)</th>
+            <th>Strategy</th><th>Mode</th>
+          </tr>
+        </thead>
+        <tbody id="trades-body">
+          <tr><td colspan="8" class="empty">No trades yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</main>
+
+<div id="toasts"></div>
+
+<script>
+// ── Chart setup ──────────────────────────────────────────────────────────────
+const ctx = document.getElementById('pnl-chart').getContext('2d');
+const pnlChart = new Chart(ctx, {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [{
+      label: 'Total Value (USDC)',
+      data: [],
+      borderColor: '#58a6ff',
+      backgroundColor: 'rgba(88,166,255,0.08)',
+      borderWidth: 2,
+      pointRadius: 0,
+      tension: 0.3,
+      fill: true,
+    }]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: {
+        ticks: { color: '#8b949e', maxTicksLimit: 6 },
+        grid: { color: '#21262d' },
+      },
+      y: {
+        ticks: { color: '#8b949e', callback: v => '$' + v.toLocaleString() },
+        grid: { color: '#21262d' },
+      }
+    }
+  }
+});
+
+const MAX_CHART_POINTS = 120;
+
+function pushChartPoint(value) {
+  const now = new Date().toLocaleTimeString();
+  pnlChart.data.labels.push(now);
+  pnlChart.data.datasets[0].data.push(value);
+  if (pnlChart.data.labels.length > MAX_CHART_POINTS) {
+    pnlChart.data.labels.shift();
+    pnlChart.data.datasets[0].data.shift();
+  }
+  pnlChart.update('none');
+}
+
+// ── Formatting helpers ───────────────────────────────────────────────────────
+const fmt$ = v => '$' + parseFloat(v).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+const fmtPnl = v => {
+  const n = parseFloat(v);
+  return (n >= 0 ? '+' : '') + fmt$(n);
+};
+function pnlClass(v) {
+  const n = parseFloat(v);
+  return n > 0 ? 'positive' : n < 0 ? 'negative' : 'neutral';
+}
+
+// ── Portfolio update ─────────────────────────────────────────────────────────
+function applyPortfolio(d) {
+  if (!d || !Object.keys(d).length) return;
+
+  const tv = d.total_value ?? 0;
+  el('total-value').textContent = fmt$(tv);
+  el('total-value').className = 'metric-value neutral';
+
+  const tp = d.total_pnl ?? 0;
+  el('total-pnl').textContent = fmtPnl(tp);
+  el('total-pnl').className = 'metric-value ' + pnlClass(tp);
+
+  el('realized-pnl').textContent = fmtPnl(d.realized_pnl ?? 0);
+  el('unrealized-pnl').textContent = fmtPnl(d.unrealized_pnl ?? 0);
+
+  const wr = (d.win_rate ?? 0) * 100;
+  el('win-rate').textContent = wr.toFixed(1) + '%';
+  el('win-rate').className = 'metric-value ' + (wr >= 50 ? 'positive' : wr > 0 ? 'negative' : 'neutral');
+
+  el('trade-count').textContent = `${d.trade_count ?? 0} trades (${d.win_count ?? 0}W / ${d.loss_count ?? 0}L)`;
+  el('cash').textContent = fmt$(d.cash_usdc ?? 0);
+  el('positions-value').textContent = fmt$(d.total_position_value ?? 0) + ' in positions';
+
+  pushChartPoint(tv);
+  el('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+// ── Positions update ─────────────────────────────────────────────────────────
+function applyPositions(positions) {
+  const tbody = el('positions-body');
+  if (!positions || !positions.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">No open positions</td></tr>';
+    return;
+  }
+  tbody.innerHTML = positions.map(p => `
+    <tr>
+      <td style="font-family:monospace;font-size:12px">${p.token_id.slice(0,14)}…</td>
+      <td><span class="tag ${p.side.toLowerCase()}">${p.side}</span></td>
+      <td>${p.shares.toFixed(2)}</td>
+      <td>${p.avg_cost.toFixed(4)}</td>
+      <td>${fmt$(p.total_cost_usdc)}</td>
+      <td style="color:var(--muted)">${p.strategy}</td>
+    </tr>
+  `).join('');
+}
+
+// ── Fill toast + trades table ────────────────────────────────────────────────
+const tradesBuffer = [];
+
+function showFillToast(fill) {
+  const isBuy = fill.side === 'BUY';
+  const div = document.createElement('div');
+  div.className = 'toast' + (isBuy ? '' : ' fill-sell');
+  div.innerHTML = `
+    <strong>${fill.side}</strong> ${parseFloat(fill.size).toFixed(2)} shares
+    @ ${parseFloat(fill.price).toFixed(4)} · <em>${fill.strategy}</em>
+    · cost ${fmt$(fill.cost_usdc)}
+  `;
+  el('toasts').appendChild(div);
+  setTimeout(() => div.remove(), 5000);
+
+  tradesBuffer.unshift(fill);
+  if (tradesBuffer.length > 50) tradesBuffer.pop();
+  renderTrades();
+}
+
+function renderTrades() {
+  const tbody = el('trades-body');
+  if (!tradesBuffer.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = tradesBuffer.map(t => `
+    <tr>
+      <td style="color:var(--muted);white-space:nowrap">${(t.filled_at||'').slice(0,19)}</td>
+      <td style="font-family:monospace;font-size:12px">${(t.token_id||'').slice(0,14)}…</td>
+      <td><span class="tag ${(t.side||'').toLowerCase()}">${t.side}</span></td>
+      <td>${parseFloat(t.price||0).toFixed(4)}</td>
+      <td>${parseFloat(t.size||0).toFixed(2)}</td>
+      <td>${fmt$(t.cost_usdc||0)}</td>
+      <td style="color:var(--muted)">${t.strategy||''}</td>
+      <td style="color:var(--muted);font-size:11px">${t.is_paper ? 'paper' : '🔴 LIVE'}</td>
+    </tr>
+  `).join('');
+}
+
+// ── WebSocket ────────────────────────────────────────────────────────────────
+function el(id) { return document.getElementById(id); }
+
+let ws, pingInterval;
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    el('dot').className = 'status-dot live';
+    el('ws-status').innerHTML = '<span class="status-dot live"></span>live';
+    pingInterval = setInterval(() => ws.readyState === 1 && ws.send('ping'), 25000);
+    loadInitialTrades();
+  };
+
+  ws.onmessage = e => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'portfolio') applyPortfolio(msg.data);
+      if (msg.type === 'positions') applyPositions(msg.data);
+      if (msg.type === 'fill')      showFillToast(msg.data);
+    } catch {}
+  };
+
+  ws.onclose = () => {
+    el('dot').className = 'status-dot';
+    el('ws-status').innerHTML = '<span class="status-dot"></span>reconnecting…';
+    clearInterval(pingInterval);
+    setTimeout(connect, 3000);
+  };
+}
+
+async function loadInitialTrades() {
+  try {
+    const r = await fetch('/api/trades?limit=20');
+    const data = await r.json();
+    if (data.trades) {
+      tradesBuffer.push(...data.trades);
+      renderTrades();
+    }
+  } catch {}
+
+  // Also load status for mode badge
+  try {
+    const r = await fetch('/api/status');
+    const data = await r.json();
+    const badge = el('mode-badge');
+    badge.textContent = data.mode;
+    badge.className = 'badge ' + (data.mode === 'live' ? 'live' : 'paper');
+  } catch {}
+}
+
+connect();
+</script>
+</body>
+</html>

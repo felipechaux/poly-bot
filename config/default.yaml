@@ -1,0 +1,57 @@
+# ============================================================
+# Polymarket Bot — Default Configuration
+# Override any value via environment variables or .env
+# ============================================================
+
+# --- Market Data Feed ---
+feed:
+  poll_interval_seconds: 2        # Order book polling interval
+  market_refresh_seconds: 60      # Full market metadata refresh
+  max_markets: 50                 # Maximum markets to track simultaneously
+
+# --- Risk Management ---
+risk:
+  max_position_size_usdc: 500.0   # Max single position in USDC
+  max_total_exposure_usdc: 3000.0 # Max total portfolio exposure
+  max_position_count: 10          # Max concurrent open positions
+  min_market_liquidity_usdc: 1000.0  # Min market liquidity to consider
+  min_price: 0.02                 # Reject orders below this price
+  max_price: 0.98                 # Reject orders above this price
+  order_debounce_seconds: 30      # Prevent duplicate signals within window
+
+# --- Paper Trading ---
+paper:
+  initial_balance_usdc: 10000.0
+  fill_mode: "order_book"         # "instant" | "order_book"
+  simulated_latency_ms: 200       # Simulated fill latency
+
+# --- Strategies ---
+strategies:
+
+  mean_reversion:
+    enabled: true
+    # Markets to target (applies filters in order)
+    market_filters:
+      min_liquidity_usdc: 2000.0
+      # category: "Politics"      # Uncomment to restrict by category
+    params:
+      # Buy YES when price < low_threshold (market oversold)
+      low_threshold: 0.07
+      # Buy NO when price > high_threshold (market overbought)
+      high_threshold: 0.93
+      # Close position when price reverts past this point
+      exit_threshold: 0.15        # Relative to entry side
+      position_size_usdc: 100.0
+
+  momentum:
+    enabled: false
+    market_filters:
+      min_liquidity_usdc: 5000.0
+    params:
+      # Minimum 1-hour price change % to enter
+      min_change_pct: 5.0
+      # Exit when momentum reverses by this %
+      reversal_pct: 2.0
+      position_size_usdc: 100.0
+      # How many consecutive updates must confirm direction
+      confirmation_periods: 3

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polybot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- uv run resolves the venv automatically -->
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>--project</string>
+        <string>/Applications/Developer/poly-bot</string>
+        <string>poly-bot</string>
+        <string>run</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Applications/Developer/poly-bot</string>
+
+    <!-- Restart if the bot crashes -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Wait 10s before restarting after a crash -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Logs -->
+    <key>StandardOutPath</key>
+    <string>/Applications/Developer/poly-bot/data/bot.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Applications/Developer/poly-bot/data/bot.error.log</string>
+
+    <!-- Start automatically on login -->
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

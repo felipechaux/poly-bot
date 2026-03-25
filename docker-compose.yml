@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  poly-bot:
+    build: .
+    image: poly-bot:latest
+    container_name: poly-bot
+    restart: unless-stopped
+
+    # Mount .env for secrets (never bake secrets into the image)
+    env_file:
+      - .env
+
+    volumes:
+      # Persist SQLite database across restarts
+      - ./data:/app/data
+
+    # Resource limits — trading bots don't need much
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.5"
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import poly_bot; print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s

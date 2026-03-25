@@ -1,0 +1,23 @@
+# Secrets — never commit
+.env
+
+# Runtime data
+data/
+*.db
+*.sqlite
+
+# Python
+*.pyc
+__pycache__/
+.venv/
+dist/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Editor / IDE
+.claude/
+.DS_Store
+.vscode/
+.idea/
