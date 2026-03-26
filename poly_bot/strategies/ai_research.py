@@ -228,15 +228,33 @@ class AIResearchStrategy(Strategy):
             })
 
         elif position is not None:
-            entry_was_yes = position.side == "BUY" and position.token_id == yes_token.token_id
-            if entry_was_yes and edge < min_edge / 2:
-                bid = ctx.best_bid or mid
+            from datetime import datetime, timezone
+            stop_loss_pct: float = self._param("stop_loss_pct", 0.30)
+            max_hold_days: float = self._param("max_hold_days", 7)
+            bid = ctx.best_bid or mid
+            current_value = bid * (position.total_cost_usdc / position.avg_cost_basis) if position.avg_cost_basis > 0 else 0.0
+            loss_pct = (position.total_cost_usdc - current_value) / position.total_cost_usdc if position.total_cost_usdc > 0 else 0.0
+            now = datetime.now(timezone.utc)
+            opened = position.opened_at
+            if opened.tzinfo is None:
+                opened = opened.replace(tzinfo=timezone.utc)
+            hold_days = (now - opened).total_seconds() / 86400
+
+            exit_reason = None
+            if loss_pct >= stop_loss_pct:
+                exit_reason = f"Stop-loss: down {loss_pct:.0%}"
+            elif hold_days >= max_hold_days:
+                exit_reason = f"Max hold: {hold_days:.1f}d"
+            elif position.token_id == yes_token.token_id and edge < min_edge / 2:
+                exit_reason = f"Edge closed: P={ai_p:.1%}, market={mid:.1%}"
+
+            if exit_reason:
                 signals.append(Signal(
                     token_id=position.token_id,
                     side="SELL",
                     price=bid,
                     size_usdc=position.total_cost_usdc,
-                    rationale=f"AI: Edge closed. P={ai_p:.1%}, market={mid:.1%}",
+                    rationale=f"AI EXIT — {exit_reason}",
                 ))
                 self._emit({
                     "event_type": "signal",

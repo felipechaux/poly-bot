@@ -29,23 +29,64 @@ class MeanReversionStrategy(Strategy):
         return "mean_reversion"
 
     async def on_market_update(self, ctx: StrategyContext) -> list[Signal]:
+        from datetime import datetime, timezone
         mid = ctx.mid_price
         if mid is None:
             return []
 
         low_threshold: float = self._param("low_threshold", 0.07)
         high_threshold: float = self._param("high_threshold", 0.93)
-        exit_threshold: float = self._param("exit_threshold", 0.15)
-        size_usdc: float = self._param("position_size_usdc", 100.0)
+        exit_threshold: float = self._param("exit_threshold", 0.18)
+        size_usdc: float = self._param("position_size_usdc", 75.0)
+        stop_loss_pct: float = self._param("stop_loss_pct", 0.35)
+        max_hold_days: float = self._param("max_hold_days", 14)
 
         signals: list[Signal] = []
         position = ctx.position
         yes_token = ctx.market.yes_token
         no_token = ctx.market.no_token
 
+        # --- Stop-loss / max hold on open position ---
+        if position is not None:
+            bid = ctx.best_bid or mid
+            current_value = bid * (position.total_cost_usdc / position.avg_cost_basis) if position.avg_cost_basis > 0 else 0.0
+            loss_pct = (position.total_cost_usdc - current_value) / position.total_cost_usdc if position.total_cost_usdc > 0 else 0.0
+            now = datetime.now(timezone.utc)
+            opened = position.opened_at
+            if opened.tzinfo is None:
+                opened = opened.replace(tzinfo=timezone.utc)
+            hold_days = (now - opened).total_seconds() / 86400
+
+            if loss_pct >= stop_loss_pct:
+                return [Signal(
+                    token_id=position.token_id,
+                    side="SELL",
+                    price=bid,
+                    size_usdc=position.total_cost_usdc,
+                    rationale=f"Stop-loss: down {loss_pct:.0%} (limit {stop_loss_pct:.0%})",
+                )]
+            if hold_days >= max_hold_days:
+                return [Signal(
+                    token_id=position.token_id,
+                    side="SELL",
+                    price=bid,
+                    size_usdc=position.total_cost_usdc,
+                    rationale=f"Max hold: {hold_days:.1f}d >= {max_hold_days}d limit",
+                )]
+
+        # --- Exit: YES position reverted to profit target ---
+        if position and position.side == "BUY" and mid > exit_threshold:
+            bid = ctx.best_bid or mid
+            return [Signal(
+                token_id=position.token_id,
+                side="SELL",
+                price=bid,
+                size_usdc=position.total_cost_usdc,
+                rationale=f"YES reverted: mid={mid:.3f} > exit={exit_threshold:.3f}",
+            )]
+
         # --- Entry: YES token is very cheap ---
         if mid < low_threshold and yes_token and position is None:
-            # Buy YES at best ask (we're buying a cheap outcome)
             ask = ctx.best_ask or mid
             signals.append(Signal(
                 token_id=yes_token.token_id,
@@ -55,25 +96,13 @@ class MeanReversionStrategy(Strategy):
                 rationale=f"YES oversold: mid={mid:.3f} < threshold={low_threshold:.3f}",
             ))
 
-        # --- Exit: YES position, price reverted ---
-        elif position and position.side == "BUY" and mid > exit_threshold:
-            bid = ctx.best_bid or mid
-            signals.append(Signal(
-                token_id=position.token_id,
-                side="SELL",
-                price=bid,
-                size_usdc=position.total_cost_usdc,
-                rationale=f"YES reverted: mid={mid:.3f} > exit={exit_threshold:.3f}",
-            ))
-
         # --- Entry: YES token is very expensive (buy NO instead) ---
         elif mid > high_threshold and no_token and position is None:
-            no_price = 1.0 - mid  # NO price = 1 - YES price
-            no_ask = no_price  # simplified; ideally fetch NO order book
+            no_price = 1.0 - mid
             signals.append(Signal(
                 token_id=no_token.token_id,
                 side="BUY",
-                price=no_ask,
+                price=no_price,
                 size_usdc=size_usdc,
                 rationale=f"YES overbought ({mid:.3f}): buying NO at {no_price:.3f}",
             ))
