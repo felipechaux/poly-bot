@@ -5,9 +5,9 @@
 
 # --- Market Data Feed ---
 feed:
-  poll_interval_seconds: 2        # Order book polling interval
-  market_refresh_seconds: 60      # Full market metadata refresh
-  max_markets: 50                 # Maximum markets to track simultaneously
+  poll_interval_seconds: 5        # Order book polling interval (was 2 — reduced load)
+  market_refresh_seconds: 300     # Full market metadata refresh (was 60 — fetch 200 markets takes longer)
+  max_markets: 60                 # Slots to fill across all categories (was 50)
 
 # --- Risk Management ---
 risk:

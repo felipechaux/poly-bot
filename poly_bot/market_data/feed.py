@@ -70,17 +70,19 @@ class MarketDataFeed:
         log.info("feed.stopped")
 
     async def _refresh_markets(self) -> None:
-        """Fetch active markets from Gamma API, apply filters."""
+        """Fetch a diverse pool of markets from Gamma API, balanced by category."""
         log.info("feed.refreshing_markets", min_liquidity=self._min_liquidity, max_markets=self._max_markets)
         try:
+            # Fetch a large pool so we have enough variety to pick from
+            fetch_limit = max(self._max_markets * 4, 200)
             markets = await self._gamma.get_markets(
-                limit=self._max_markets,
+                limit=fetch_limit,
                 active=True,
                 closed=False,
             )
             log.info("feed.gamma_returned", count=len(markets))
 
-            # Filter by liquidity
+            # Filter by liquidity and accepting orders
             filtered = [
                 m for m in markets
                 if m.liquidity >= self._min_liquidity and m.accepting_orders
@@ -88,19 +90,51 @@ class MarketDataFeed:
             log.info("feed.after_liquidity_filter", count=len(filtered),
                      dropped=len(markets) - len(filtered))
 
-            # Keep top markets by liquidity
-            filtered.sort(key=lambda m: m.liquidity, reverse=True)
-            filtered = filtered[: self._max_markets]
+            # Group by category and take top markets per category (diversity)
+            from collections import defaultdict
+            by_category: dict[str, list[Market]] = defaultdict(list)
+            for m in filtered:
+                cat = (m.category or "Other").strip() or "Other"
+                by_category[cat].append(m)
 
-            # Enrich markets that have no token IDs (Gamma API stopped returning them)
-            needs_enrichment = [m for m in filtered if not m.yes_token]
-            already_has_tokens = [m for m in filtered if m.yes_token]
-            log.info("feed.token_enrichment_needed",
-                     already_have_tokens=len(already_has_tokens),
-                     need_clob_enrichment=len(needs_enrichment))
+            # Sort within each category by liquidity
+            for cat in by_category:
+                by_category[cat].sort(key=lambda m: m.liquidity, reverse=True)
 
+            # Interleave: round-robin across categories to fill max_markets slots
+            selected: list[Market] = []
+            slots_per_cat = max(2, self._max_markets // max(len(by_category), 1))
+            categories_sorted = sorted(by_category.keys(), key=lambda c: by_category[c][0].liquidity, reverse=True)
+
+            # First pass: up to slots_per_cat per category
+            for cat in categories_sorted:
+                selected.extend(by_category[cat][:slots_per_cat])
+                if len(selected) >= self._max_markets:
+                    break
+
+            # Fill remaining slots with highest-liquidity leftovers
+            if len(selected) < self._max_markets:
+                seen = {m.condition_id for m in selected}
+                remaining = sorted(
+                    [m for m in filtered if m.condition_id not in seen],
+                    key=lambda m: m.liquidity,
+                    reverse=True,
+                )
+                selected.extend(remaining[: self._max_markets - len(selected)])
+
+            selected = selected[: self._max_markets]
+
+            log.info(
+                "feed.diversity_selection",
+                total_candidates=len(filtered),
+                categories=len(by_category),
+                selected=len(selected),
+                category_breakdown={cat: len(by_category[cat]) for cat in categories_sorted[:8]},
+            )
+
+            # Enrich markets that have no token IDs
             enriched = await asyncio.gather(
-                *[self._enrich_tokens(m) for m in filtered],
+                *[self._enrich_tokens(m) for m in selected],
                 return_exceptions=True,
             )
             errors = [r for r in enriched if isinstance(r, Exception)]
@@ -108,19 +142,18 @@ class MarketDataFeed:
             without_tokens = [m for m in enriched if isinstance(m, Market) and not m.yes_token]
 
             if errors:
-                log.error("feed.enrichment_errors", count=len(errors),
-                          first_error=str(errors[0]))
+                log.error("feed.enrichment_errors", count=len(errors), first_error=str(errors[0]))
             if without_tokens:
-                log.warning("feed.markets_dropped_no_tokens", count=len(without_tokens),
-                            condition_ids=[m.condition_id for m in without_tokens[:3]])
+                log.warning("feed.markets_dropped_no_tokens", count=len(without_tokens))
 
             self._markets = {m.condition_id: m for m in with_tokens}
             self._last_market_refresh = datetime.utcnow()
-            log.info("feed.markets_updated", count=len(self._markets),
-                     sample_yes_prices=[
-                         {"q": m.question[:40], "yes_price": m.yes_token.price}
-                         for m in list(with_tokens)[:3]
-                     ])
+            log.info(
+                "feed.markets_updated",
+                count=len(self._markets),
+                sample=[{"q": m.question[:50], "cat": m.category, "price": m.yes_token.price}
+                        for m in list(with_tokens)[:5]],
+            )
         except Exception as exc:
             log.error("feed.market_refresh_failed", error=str(exc), error_type=type(exc).__name__,
                       exc_info=True)
