@@ -104,6 +104,8 @@ class Bot:
             market_refresh_interval=feed_cfg.get("market_refresh_seconds", 60.0),
             max_markets=feed_cfg.get("max_markets", 50),
             min_liquidity=risk_cfg.get("min_market_liquidity_usdc", 1000.0),
+            min_yes_price=feed_cfg.get("min_yes_price", 0.0),
+            max_yes_price=feed_cfg.get("max_yes_price", 1.0),
         )
 
         self._running = False

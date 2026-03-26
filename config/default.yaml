@@ -5,9 +5,12 @@
 
 # --- Market Data Feed ---
 feed:
-  poll_interval_seconds: 5        # Order book polling interval (was 2 — reduced load)
-  market_refresh_seconds: 300     # Full market metadata refresh (was 60 — fetch 200 markets takes longer)
-  max_markets: 60                 # Slots to fill across all categories (was 50)
+  poll_interval_seconds: 5
+  market_refresh_seconds: 300
+  max_markets: 60
+  # Only track markets with genuine uncertainty — skip long-shots and near-resolved
+  min_yes_price: 0.05             # Skip markets already at <5% (long shots like Haiti/WorldCup)
+  max_yes_price: 0.95             # Skip markets already near resolution
 
 # --- Risk Management ---
 risk:
@@ -48,16 +51,14 @@ strategies:
   ai_research:
     enabled: true
     params:
-      min_edge_pct: 0.12          # Was 0.05 — require 12% edge, not 5%
-      min_confidence: "high"      # Was "medium" — only trade high-confidence calls
-      position_size_usdc: 100.0   # Was 150 — smaller to preserve capital
-      research_interval_min: 30.0 # Was 20 — less frequent, better quality
-      max_markets_per_cycle: 3
-      min_research_liquidity: 10000.0  # Was 3000 — only well-funded markets
-      # Stop-loss: exit when position is down this fraction of cost basis
-      stop_loss_pct: 0.30         # Exit if down 30%
-      # Max days to hold before force-exiting
-      max_hold_days: 7            # AI trades should resolve quickly
+      min_edge_pct: 0.08          # 8% edge required — was 12% (too strict, 0 trades)
+      min_confidence: "medium"    # was "high" — medium still filters noise but allows more trades
+      position_size_usdc: 100.0
+      research_interval_min: 15.0 # Re-research every 15min (was 30)
+      max_markets_per_cycle: 10   # Research 10 markets per hour (was 3 — caused 3-market loop)
+      min_research_liquidity: 3000.0  # Was 10000 — too restrictive
+      stop_loss_pct: 0.30
+      max_hold_days: 7
 
   momentum:
     enabled: false

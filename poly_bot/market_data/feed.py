@@ -31,6 +31,8 @@ class MarketDataFeed:
         market_refresh_interval: float = 60.0,
         max_markets: int = 50,
         min_liquidity: float = 1000.0,
+        min_yes_price: float = 0.0,
+        max_yes_price: float = 1.0,
     ) -> None:
         self._clob = clob_client
         self._gamma = gamma_client
@@ -39,6 +41,8 @@ class MarketDataFeed:
         self._market_refresh_interval = market_refresh_interval
         self._max_markets = max_markets
         self._min_liquidity = min_liquidity
+        self._min_yes_price = min_yes_price
+        self._max_yes_price = max_yes_price
 
         self._markets: dict[str, Market] = {}  # condition_id -> Market
         self._last_market_refresh: datetime | None = None
@@ -82,13 +86,21 @@ class MarketDataFeed:
             )
             log.info("feed.gamma_returned", count=len(markets))
 
-            # Filter by liquidity and accepting orders
+            # Filter by liquidity, accepting orders, and yes_price range
             filtered = [
                 m for m in markets
-                if m.liquidity >= self._min_liquidity and m.accepting_orders
+                if m.liquidity >= self._min_liquidity
+                and m.accepting_orders
+                and m.yes_token is not None
+                and self._min_yes_price <= m.yes_token.price <= self._max_yes_price
             ]
+            longshots = sum(
+                1 for m in markets
+                if m.yes_token and m.yes_token.price < self._min_yes_price
+            )
             log.info("feed.after_liquidity_filter", count=len(filtered),
-                     dropped=len(markets) - len(filtered))
+                     dropped=len(markets) - len(filtered),
+                     longshots_excluded=longshots)
 
             # Group by category and take top markets per category (diversity)
             from collections import defaultdict
