@@ -126,23 +126,52 @@ class GammaClient:
             or last_trade
         )
 
+        # Parse clobTokenIds (JSON string) — Gamma API never returns a `tokens` array
+        import json as _json
+        clob_token_ids: list[str] = []
+        raw_clob = data.get("clobTokenIds", "[]")
+        if isinstance(raw_clob, str):
+            try:
+                clob_token_ids = _json.loads(raw_clob)
+            except Exception:
+                pass
+        elif isinstance(raw_clob, list):
+            clob_token_ids = raw_clob
+
+        # Parse outcomes list (JSON string)
+        outcomes: list[str] = []
+        raw_outcomes = data.get("outcomes", "[]")
+        if isinstance(raw_outcomes, str):
+            try:
+                outcomes = _json.loads(raw_outcomes)
+            except Exception:
+                pass
+        elif isinstance(raw_outcomes, list):
+            outcomes = raw_outcomes
+
         tokens: list[Token] = []
-        for t in data.get("tokens", []) or []:
-            outcome = str(t.get("outcome", ""))
-            raw_price = float(t.get("price", 0.0))
-            # Fall back to outcomePrices → market mid → last trade price
-            if raw_price == 0.0:
-                if outcome.lower() == "yes":
-                    raw_price = yes_price_fallback
-                elif outcome.lower() == "no":
-                    raw_price = _outcome_price_map.get("no", 0.0) or (1.0 - yes_price_fallback if yes_price_fallback else 0.0)
-            tokens.append(
-                Token(
+
+        # Build tokens from clobTokenIds + outcomes + outcomePrices (no CLOB API needed)
+        if clob_token_ids:
+            for i, token_id in enumerate(clob_token_ids):
+                outcome = outcomes[i] if i < len(outcomes) else ("Yes" if i == 0 else "No")
+                price = outcome_prices[i] if i < len(outcome_prices) else yes_price_fallback
+                tokens.append(Token(token_id=str(token_id), outcome=outcome, price=price))
+        else:
+            # Fallback: legacy `tokens` array (older API format)
+            for t in data.get("tokens", []) or []:
+                outcome = str(t.get("outcome", ""))
+                raw_price = float(t.get("price", 0.0))
+                if raw_price == 0.0:
+                    if outcome.lower() == "yes":
+                        raw_price = yes_price_fallback
+                    elif outcome.lower() == "no":
+                        raw_price = _outcome_price_map.get("no", 0.0) or (1.0 - yes_price_fallback if yes_price_fallback else 0.0)
+                tokens.append(Token(
                     token_id=str(t.get("token_id", t.get("tokenId", ""))),
                     outcome=outcome,
                     price=raw_price,
-                )
-            )
+                ))
 
         def _parse_dt(val: Any) -> datetime | None:
             if not val:
