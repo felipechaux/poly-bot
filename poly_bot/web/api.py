@@ -12,11 +12,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi import Request
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from poly_bot.observability.logging import get_logger
 
@@ -65,7 +66,24 @@ def create_app(bot_ref: list) -> FastAPI:
     app = FastAPI(
         title="Poly Bot Dashboard",
         description="Polymarket trading bot web interface",
-        version="0.1.0",
+        version="0.2.0",
+    )
+
+    # Override Railway CDN headers that cause browser warnings
+    class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            response = await call_next(request)
+            response.headers["Permissions-Policy"] = (
+                "camera=(), microphone=(), geolocation=()"
+            )
+            return response
+
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
     )
 
     if static_dir.exists():
