@@ -87,7 +87,13 @@ class MarketDataFeed:
             filtered.sort(key=lambda m: m.liquidity, reverse=True)
             filtered = filtered[: self._max_markets]
 
-            self._markets = {m.condition_id: m for m in filtered}
+            # Enrich markets that have no token IDs (Gamma API stopped returning them)
+            enriched = await asyncio.gather(
+                *[self._enrich_tokens(m) for m in filtered],
+                return_exceptions=True,
+            )
+            with_tokens = [m for m in enriched if isinstance(m, Market) and m.yes_token]
+            self._markets = {m.condition_id: m for m in with_tokens}
             self._last_market_refresh = datetime.utcnow()
             log.info("feed.markets_updated", count=len(self._markets))
         except Exception as exc:
@@ -101,6 +107,13 @@ class MarketDataFeed:
         ]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _enrich_tokens(self, market: Market) -> Market:
+        """If market has no token IDs, fetch them from the CLOB API."""
+        if market.yes_token:
+            return market
+        tokens = await self._clob.get_market_tokens(market.condition_id)
+        return market.model_copy(update={"tokens": tokens})
 
     async def _poll_market(self, market: Market) -> None:
         """Poll order book for the YES token of a market."""

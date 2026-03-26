@@ -9,7 +9,9 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from poly_bot.market_data.models import OrderBookSummary, PriceLevel
+import httpx
+
+from poly_bot.market_data.models import OrderBookSummary, PriceLevel, Token
 from poly_bot.observability.logging import get_logger
 
 log = get_logger(__name__)
@@ -126,6 +128,25 @@ class AsyncClobClient:
             bids=bids,
             asks=asks,
         )
+
+    async def get_market_tokens(self, condition_id: str) -> list[Token]:
+        """Fetch YES/NO token IDs for a market from the CLOB API."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(f"{self._host}/markets/{condition_id}")
+                resp.raise_for_status()
+                data = resp.json()
+            tokens = []
+            for t in data.get("tokens", []):
+                token_id = str(t.get("token_id", ""))
+                outcome = str(t.get("outcome", ""))
+                price = float(t.get("price", 0.0))
+                if token_id:
+                    tokens.append(Token(token_id=token_id, outcome=outcome, price=price))
+            return tokens
+        except Exception as exc:
+            log.warning("clob.market_tokens_failed", condition_id=condition_id, error=str(exc))
+            return []
 
     async def close(self) -> None:
         self._executor.shutdown(wait=False)
