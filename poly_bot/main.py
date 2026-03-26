@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 from typing import Optional
 
@@ -54,12 +55,12 @@ def run(
         None, "--strategy", "-s", help="Strategy name(s) to enable (overrides config)"
     ),
     host: str = typer.Option("0.0.0.0", "--host", help="Web dashboard host"),
-    port: int = typer.Option(8080, "--port", "-p", help="Web dashboard port"),
+    port: int = typer.Option(
+        int(os.environ.get("PORT", 8080)), "--port", "-p", help="Web dashboard port"
+    ),
     no_web: bool = typer.Option(False, "--no-web", help="Disable web dashboard"),
 ) -> None:
     """Start the trading bot with web dashboard."""
-    import os
-
     if mode:
         os.environ["POLY_MODE"] = mode
 

@@ -39,7 +39,8 @@ ENV LOG_FORMAT=json
 ENV POLY_MODE=paper
 ENV ENABLE_LIVE_TRADING=false
 
-VOLUME ["/app/data"]
+# /app/data is mounted as a Railway Volume for SQLite persistence
+# See: https://docs.railway.com/reference/volumes
 
 ENTRYPOINT ["poly-bot"]
 CMD ["run"]
