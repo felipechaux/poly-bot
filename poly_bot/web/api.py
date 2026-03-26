@@ -208,6 +208,24 @@ def create_app(bot_ref: list) -> FastAPI:
         except Exception as exc:
             return {"markets": [], "error": str(exc)}
 
+    @app.get("/api/debug/gamma")
+    async def debug_gamma(limit: int = 3):
+        """Return raw Gamma API response for diagnosing price field issues."""
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    "https://gamma-api.polymarket.com/markets",
+                    params={"limit": limit, "active": "true", "closed": "false"},
+                    headers={"User-Agent": "poly-bot/0.1.0"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            # Return first market raw so we can see all available fields
+            return {"raw_markets": data[:limit] if isinstance(data, list) else data}
+        except Exception as exc:
+            return {"error": str(exc)}
+
     @app.get("/api/agent")
     async def agent_events(limit: int = 100):
         try:

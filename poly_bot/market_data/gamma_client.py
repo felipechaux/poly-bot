@@ -87,13 +87,27 @@ class GammaClient:
         elif len(outcome_prices) == 1:
             _outcome_price_map = {"yes": outcome_prices[0]}
 
+        # Market-level price fallbacks that don't require CLOB API
+        best_bid = float(data.get("bestBid", data.get("best_bid", 0.0)) or 0.0)
+        best_ask = float(data.get("bestAsk", data.get("best_ask", 0.0)) or 0.0)
+        last_trade = float(data.get("lastTradePrice", data.get("last_trade_price", 0.0)) or 0.0)
+        mid_from_gamma = (best_bid + best_ask) / 2 if best_bid > 0 and best_ask > 0 else 0.0
+        yes_price_fallback = (
+            _outcome_price_map.get("yes", 0.0)
+            or mid_from_gamma
+            or last_trade
+        )
+
         tokens: list[Token] = []
         for t in data.get("tokens", []) or []:
             outcome = str(t.get("outcome", ""))
             raw_price = float(t.get("price", 0.0))
-            # Fall back to outcomePrices if the token has no price
+            # Fall back to outcomePrices → market mid → last trade price
             if raw_price == 0.0:
-                raw_price = _outcome_price_map.get(outcome.lower(), 0.0)
+                if outcome.lower() == "yes":
+                    raw_price = yes_price_fallback
+                elif outcome.lower() == "no":
+                    raw_price = _outcome_price_map.get("no", 0.0) or (1.0 - yes_price_fallback if yes_price_fallback else 0.0)
             tokens.append(
                 Token(
                     token_id=str(t.get("token_id", t.get("tokenId", ""))),
