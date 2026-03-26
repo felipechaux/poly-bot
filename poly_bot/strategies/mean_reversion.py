@@ -15,6 +15,7 @@ Paper trading validation metrics to watch:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from poly_bot.execution.models import Fill
@@ -29,7 +30,6 @@ class MeanReversionStrategy(Strategy):
         return "mean_reversion"
 
     async def on_market_update(self, ctx: StrategyContext) -> list[Signal]:
-        from datetime import datetime, timezone
         mid = ctx.mid_price
         if mid is None:
             return []

@@ -28,7 +28,7 @@ import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from groq import AsyncGroq
@@ -228,7 +228,6 @@ class AIResearchStrategy(Strategy):
             })
 
         elif position is not None:
-            from datetime import datetime, timezone
             stop_loss_pct: float = self._param("stop_loss_pct", 0.30)
             max_hold_days: float = self._param("max_hold_days", 7)
             bid = ctx.best_bid or mid
