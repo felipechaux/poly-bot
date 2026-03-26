@@ -158,25 +158,51 @@ def create_app(bot_ref: list) -> FastAPI:
             return {"trades": [], "error": str(exc)}
 
     @app.get("/api/markets")
-    async def markets(limit: int = 20, min_liquidity: float = 5000.0):
+    async def markets(limit: int = 20, min_liquidity: float = 1000.0):
+        # Prefer live feed data if the bot is running and feed is populated
         bot = _get_bot()
-        if not bot:
-            return {"markets": []}
-        tracked = bot._feed.tracked_markets[:limit]
-        return {
-            "markets": [
-                {
-                    "condition_id": m.condition_id,
-                    "question": m.question,
-                    "category": m.category,
-                    "liquidity": m.liquidity,
-                    "volume": m.volume,
-                    "yes_price": m.yes_token.price if m.yes_token else 0.0,
-                }
-                for m in tracked
-                if m.liquidity >= min_liquidity
-            ]
-        }
+        tracked = bot._feed.tracked_markets if bot else []
+
+        if tracked:
+            filtered = [m for m in tracked if m.liquidity >= min_liquidity]
+            filtered.sort(key=lambda m: m.liquidity, reverse=True)
+            return {
+                "markets": [
+                    {
+                        "condition_id": m.condition_id,
+                        "question": m.question,
+                        "category": m.category,
+                        "liquidity": m.liquidity,
+                        "volume": m.volume,
+                        "yes_price": m.yes_token.price if m.yes_token else 0.0,
+                    }
+                    for m in filtered[:limit]
+                ]
+            }
+
+        # Fall back to fetching directly from Gamma API
+        try:
+            from poly_bot.market_data.gamma_client import GammaClient
+            gamma = GammaClient()
+            raw = await gamma.get_markets(limit=limit * 2, active=True, closed=False)
+            await gamma.close()
+            filtered = [m for m in raw if m.liquidity >= min_liquidity]
+            filtered.sort(key=lambda m: m.liquidity, reverse=True)
+            return {
+                "markets": [
+                    {
+                        "condition_id": m.condition_id,
+                        "question": m.question,
+                        "category": m.category,
+                        "liquidity": m.liquidity,
+                        "volume": m.volume,
+                        "yes_price": m.yes_token.price if m.yes_token else 0.0,
+                    }
+                    for m in filtered[:limit]
+                ]
+            }
+        except Exception as exc:
+            return {"markets": [], "error": str(exc)}
 
     @app.get("/api/agent")
     async def agent_events(limit: int = 100):
