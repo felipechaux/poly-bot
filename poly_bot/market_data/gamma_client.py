@@ -68,17 +68,7 @@ class GammaClient:
             return None
 
     def _parse_market(self, data: dict[str, Any]) -> Market:
-        tokens: list[Token] = []
-        for t in data.get("tokens", []) or []:
-            tokens.append(
-                Token(
-                    token_id=str(t.get("token_id", t.get("tokenId", ""))),
-                    outcome=str(t.get("outcome", "")),
-                    price=float(t.get("price", 0.0)),
-                )
-            )
-
-        # Parse outcome prices list
+        # Parse outcome prices list first so we can enrich tokens
         outcome_prices: list[float] = []
         raw_prices = data.get("outcomePrices", data.get("outcome_prices", "[]"))
         if isinstance(raw_prices, str):
@@ -89,6 +79,28 @@ class GammaClient:
                 pass
         elif isinstance(raw_prices, list):
             outcome_prices = [float(p) for p in raw_prices]
+
+        # Build a outcome-name → price map: YES → index 0, NO → index 1
+        _outcome_price_map = {}
+        if len(outcome_prices) >= 2:
+            _outcome_price_map = {"yes": outcome_prices[0], "no": outcome_prices[1]}
+        elif len(outcome_prices) == 1:
+            _outcome_price_map = {"yes": outcome_prices[0]}
+
+        tokens: list[Token] = []
+        for t in data.get("tokens", []) or []:
+            outcome = str(t.get("outcome", ""))
+            raw_price = float(t.get("price", 0.0))
+            # Fall back to outcomePrices if the token has no price
+            if raw_price == 0.0:
+                raw_price = _outcome_price_map.get(outcome.lower(), 0.0)
+            tokens.append(
+                Token(
+                    token_id=str(t.get("token_id", t.get("tokenId", ""))),
+                    outcome=outcome,
+                    price=raw_price,
+                )
+            )
 
         def _parse_dt(val: Any) -> datetime | None:
             if not val:

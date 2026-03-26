@@ -174,7 +174,9 @@ def create_app(bot_ref: list) -> FastAPI:
                         "category": m.category,
                         "liquidity": m.liquidity,
                         "volume": m.volume,
-                        "yes_price": m.yes_token.price if m.yes_token else 0.0,
+                        "yes_price": (m.yes_token.price if m.yes_token and m.yes_token.price > 0
+                                      else m.outcome_prices[0] if m.outcome_prices
+                                      else m.last_trade_price),
                     }
                     for m in filtered[:limit]
                 ]
@@ -196,7 +198,9 @@ def create_app(bot_ref: list) -> FastAPI:
                         "category": m.category,
                         "liquidity": m.liquidity,
                         "volume": m.volume,
-                        "yes_price": m.yes_token.price if m.yes_token else 0.0,
+                        "yes_price": (m.yes_token.price if m.yes_token and m.yes_token.price > 0
+                                      else m.outcome_prices[0] if m.outcome_prices
+                                      else m.last_trade_price),
                     }
                     for m in filtered[:limit]
                 ]
