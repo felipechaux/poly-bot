@@ -46,15 +46,43 @@ class GammaClient:
             "closed": str(closed).lower(),
             **filters,
         }
+        log.info("gamma.fetching_markets", url=f"{self._host}/markets", params=params)
         try:
             resp = await self._client.get("/markets", params=params)
+            log.info("gamma.response", status=resp.status_code, url=str(resp.url))
             resp.raise_for_status()
             data: list[dict[str, Any]] = resp.json()
+            if not data:
+                log.warning("gamma.empty_response", msg="Gamma returned 0 markets")
+                return []
+            # Log which price fields are present in the first market for diagnostics
+            sample = data[0] if data else {}
+            log.info(
+                "gamma.sample_fields",
+                has_tokens=bool(sample.get("tokens")),
+                has_outcome_prices=bool(sample.get("outcomePrices")),
+                has_best_bid=bool(sample.get("bestBid")),
+                has_best_ask=bool(sample.get("bestAsk")),
+                has_last_trade=bool(sample.get("lastTradePrice")),
+                token_count=len(sample.get("tokens") or []),
+                sample_outcome_prices=sample.get("outcomePrices"),
+                sample_best_bid=sample.get("bestBid"),
+                sample_best_ask=sample.get("bestAsk"),
+            )
             markets = [self._parse_market(m) for m in data if isinstance(m, dict)]
-            log.debug("gamma.markets_fetched", count=len(markets))
+            with_price = sum(1 for m in markets if m.yes_token and m.yes_token.price > 0)
+            log.info(
+                "gamma.markets_fetched",
+                total=len(markets),
+                with_yes_price=with_price,
+                without_yes_price=len(markets) - with_price,
+            )
             return markets
+        except httpx.HTTPStatusError as exc:
+            log.error("gamma.http_error", status=exc.response.status_code, url=str(exc.request.url), body=exc.response.text[:200])
+            return []
         except httpx.HTTPError as exc:
-            log.error("gamma.fetch_failed", error=str(exc))
+            log.error("gamma.fetch_failed", error=str(exc), error_type=type(exc).__name__)
             return []
 
     async def get_market(self, condition_id: str) -> Market | None:

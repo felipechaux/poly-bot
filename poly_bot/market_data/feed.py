@@ -71,33 +71,59 @@ class MarketDataFeed:
 
     async def _refresh_markets(self) -> None:
         """Fetch active markets from Gamma API, apply filters."""
-        log.debug("feed.refreshing_markets")
+        log.info("feed.refreshing_markets", min_liquidity=self._min_liquidity, max_markets=self._max_markets)
         try:
             markets = await self._gamma.get_markets(
                 limit=self._max_markets,
                 active=True,
                 closed=False,
             )
+            log.info("feed.gamma_returned", count=len(markets))
+
             # Filter by liquidity
             filtered = [
                 m for m in markets
                 if m.liquidity >= self._min_liquidity and m.accepting_orders
             ]
+            log.info("feed.after_liquidity_filter", count=len(filtered),
+                     dropped=len(markets) - len(filtered))
+
             # Keep top markets by liquidity
             filtered.sort(key=lambda m: m.liquidity, reverse=True)
             filtered = filtered[: self._max_markets]
 
             # Enrich markets that have no token IDs (Gamma API stopped returning them)
+            needs_enrichment = [m for m in filtered if not m.yes_token]
+            already_has_tokens = [m for m in filtered if m.yes_token]
+            log.info("feed.token_enrichment_needed",
+                     already_have_tokens=len(already_has_tokens),
+                     need_clob_enrichment=len(needs_enrichment))
+
             enriched = await asyncio.gather(
                 *[self._enrich_tokens(m) for m in filtered],
                 return_exceptions=True,
             )
+            errors = [r for r in enriched if isinstance(r, Exception)]
             with_tokens = [m for m in enriched if isinstance(m, Market) and m.yes_token]
+            without_tokens = [m for m in enriched if isinstance(m, Market) and not m.yes_token]
+
+            if errors:
+                log.error("feed.enrichment_errors", count=len(errors),
+                          first_error=str(errors[0]))
+            if without_tokens:
+                log.warning("feed.markets_dropped_no_tokens", count=len(without_tokens),
+                            condition_ids=[m.condition_id for m in without_tokens[:3]])
+
             self._markets = {m.condition_id: m for m in with_tokens}
             self._last_market_refresh = datetime.utcnow()
-            log.info("feed.markets_updated", count=len(self._markets))
+            log.info("feed.markets_updated", count=len(self._markets),
+                     sample_yes_prices=[
+                         {"q": m.question[:40], "yes_price": m.yes_token.price}
+                         for m in list(with_tokens)[:3]
+                     ])
         except Exception as exc:
-            log.error("feed.market_refresh_failed", error=str(exc))
+            log.error("feed.market_refresh_failed", error=str(exc), error_type=type(exc).__name__,
+                      exc_info=True)
 
     async def _poll_all(self) -> None:
         """Poll order books for all tracked markets concurrently."""
@@ -111,8 +137,14 @@ class MarketDataFeed:
     async def _enrich_tokens(self, market: Market) -> Market:
         """If market has no token IDs, fetch them from the CLOB API."""
         if market.yes_token:
+            log.debug("feed.token_skip_enrich", condition_id=market.condition_id,
+                      yes_price=market.yes_token.price)
             return market
+        log.info("feed.enriching_via_clob", condition_id=market.condition_id,
+                 question=market.question[:50])
         tokens = await self._clob.get_market_tokens(market.condition_id)
+        if not tokens:
+            log.warning("feed.clob_returned_no_tokens", condition_id=market.condition_id)
         return market.model_copy(update={"tokens": tokens})
 
     async def _poll_market(self, market: Market) -> None:

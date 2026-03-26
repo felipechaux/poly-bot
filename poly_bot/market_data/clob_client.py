@@ -131,9 +131,12 @@ class AsyncClobClient:
 
     async def get_market_tokens(self, condition_id: str) -> list[Token]:
         """Fetch YES/NO token IDs for a market from the CLOB API."""
+        url = f"{self._host}/markets/{condition_id}"
+        log.info("clob.fetching_tokens", condition_id=condition_id, url=url)
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(f"{self._host}/markets/{condition_id}")
+                resp = await client.get(url)
+                log.info("clob.token_response", condition_id=condition_id, status=resp.status_code)
                 resp.raise_for_status()
                 data = resp.json()
             tokens = []
@@ -143,9 +146,16 @@ class AsyncClobClient:
                 price = float(t.get("price", 0.0))
                 if token_id:
                     tokens.append(Token(token_id=token_id, outcome=outcome, price=price))
+            log.info("clob.tokens_fetched", condition_id=condition_id, count=len(tokens),
+                     tokens=[{"outcome": t.outcome, "price": t.price} for t in tokens])
             return tokens
+        except httpx.HTTPStatusError as exc:
+            log.error("clob.market_tokens_http_error", condition_id=condition_id,
+                      status=exc.response.status_code, body=exc.response.text[:200])
+            return []
         except Exception as exc:
-            log.warning("clob.market_tokens_failed", condition_id=condition_id, error=str(exc))
+            log.error("clob.market_tokens_failed", condition_id=condition_id,
+                      error=str(exc), error_type=type(exc).__name__)
             return []
 
     async def close(self) -> None:
