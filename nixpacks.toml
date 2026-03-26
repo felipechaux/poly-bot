@@ -8,4 +8,4 @@ cmds = [
 ]
 
 [start]
-cmd = "uv run poly-bot run --host 0.0.0.0"
+cmd = ".venv/bin/poly-bot run --host 0.0.0.0"
