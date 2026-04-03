@@ -5,12 +5,12 @@
 
 # --- Market Data Feed ---
 feed:
-  poll_interval_seconds: 5
+  poll_interval_seconds: 10       # Was 5 — reduce polling, fewer low-quality signals
   market_refresh_seconds: 300
-  max_markets: 60
+  max_markets: 25                 # Was 60 — fewer markets, higher quality selection
   # Only track markets with genuine uncertainty — skip long-shots and near-resolved
-  min_yes_price: 0.05             # Skip markets already at <5% (long shots like Haiti/WorldCup)
-  max_yes_price: 0.95             # Skip markets already near resolution
+  min_yes_price: 0.10             # Was 0.05 — skip even more long-shots
+  max_yes_price: 0.90             # Was 0.95 — skip near-resolved
 
 # --- Risk Management ---
 risk:
@@ -34,31 +34,31 @@ strategies:
   mean_reversion:
     enabled: true
     market_filters:
-      min_liquidity_usdc: 5000.0  # Raised: only liquid markets
+      min_liquidity_usdc: 5000.0
     params:
-      # Buy YES when price is very cheap (oversold)
-      low_threshold: 0.07         # Was 0.15 — tighter entry, stronger signal
-      # Buy NO when price is very expensive (overbought)
-      high_threshold: 0.93        # Was 0.85 — symmetric
-      # Exit when price reverts to this level (must be > low_threshold for profit)
-      exit_threshold: 0.18        # Was 0.15 = same as entry! Now gives real profit margin
-      position_size_usdc: 75.0    # Was 100 — smaller to preserve capital
-      # Stop-loss: exit when position is down this fraction of cost basis
-      stop_loss_pct: 0.35         # Exit if down 35%
-      # Max days to hold before force-exiting stale positions
-      max_hold_days: 14
+      # Entry: require genuine 24h overreaction signal (sharp price drop/spike)
+      drop_threshold_pct: 15.0    # 15% 24h price change required to enter
+      # Entry range: only buy in "meaningful uncertainty" zone, not extreme ends
+      entry_low: 0.20             # Min YES price to enter (won't buy lottery tickets <20%)
+      entry_high: 0.45            # Max YES price for YES buy (symmetric for NO buy: 0.55-0.80)
+      # Exit: percentage gain from entry price (not absolute threshold)
+      profit_target_pct: 0.15     # Exit when mid >= entry_price × 1.15 (+15%)
+      position_size_usdc: 50.0    # Smaller positions while validating new logic
+      stop_loss_pct: 0.20         # Tighter: exit if down 20% (was 35%)
+      max_hold_days: 7            # Was 14
 
   ai_research:
     enabled: true
     params:
-      min_edge_pct: 0.08          # 8% edge required — was 12% (too strict, 0 trades)
-      min_confidence: "medium"    # was "high" — medium still filters noise but allows more trades
-      position_size_usdc: 100.0
-      research_interval_min: 15.0 # Re-research every 15min (was 30)
-      max_markets_per_cycle: 10   # Research 10 markets per hour (was 3 — caused 3-market loop)
-      min_research_liquidity: 3000.0  # Was 10000 — too restrictive
-      stop_loss_pct: 0.30
-      max_hold_days: 7
+      min_edge_pct: 0.18          # 18% edge required (was 8% — far too low vs market noise)
+      min_confidence: "high"      # Was "medium" — only high-conviction AI calls
+      position_size_usdc: 75.0    # Was 100
+      research_interval_min: 30.0 # Was 15 — less churn, more deliberate
+      max_markets_per_cycle: 5    # Was 10 — research fewer, better markets
+      min_research_liquidity: 5000.0  # Was 3000
+      min_volume_usdc: 10000.0    # NEW: only research markets with real trading volume
+      stop_loss_pct: 0.20         # Was 0.30 — tighter
+      max_hold_days: 5            # Was 7
 
   momentum:
     enabled: false

@@ -139,11 +139,14 @@ class AIResearchStrategy(Strategy):
         cached = self._cache.get(condition_id)
         needs_research = cached is None or cached.is_stale(interval_min)
 
+        min_volume: float = self._param("min_volume_usdc", 10000.0)
+
         if (
             needs_research
             and condition_id not in self._in_flight
             and self._cycle_research_count < max_per_cycle
             and ctx.market.liquidity >= self._param("min_research_liquidity", 5000.0)
+            and ctx.market.volume >= min_volume
         ):
             self._in_flight.add(condition_id)
             self._cycle_research_count += 1
@@ -340,7 +343,7 @@ class AIResearchStrategy(Strategy):
                 lambda: list(DDGS().text(question, max_results=max_results)),
             )
             if not results:
-                return "No search results found."
+                return ""
             snippets = []
             for r in results:
                 title = r.get("title", "")
@@ -349,11 +352,21 @@ class AIResearchStrategy(Strategy):
             return "\n".join(snippets)
         except Exception as exc:
             log.warning("ai_research.search_failed", error=str(exc))
-            return "Web search unavailable."
+            return ""
 
     async def _call_llm(self, question: str) -> dict[str, Any]:
         """Search DuckDuckGo then ask Llama 3.3 70B via Groq to estimate probability."""
         search_results = await self._search_web(question)
+
+        # No search results → can't form an informed view, return low confidence
+        if not search_results:
+            log.warning("ai_research.no_search_results", question=question[:60])
+            return {
+                "probability_yes": 0.5,
+                "confidence": "low",
+                "reasoning": "No web search results found — cannot estimate probability.",
+                "key_factors": [],
+            }
 
         user_message = (
             f"Prediction market question: \"{question}\"\n\n"
