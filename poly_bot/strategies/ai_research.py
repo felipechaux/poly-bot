@@ -46,12 +46,13 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Free models on OpenRouter — rotated automatically when one hits its rate limit.
 # All end with :free so they have no per-token cost.
+# IDs verified against openrouter.ai/models?q=free (April 2025).
 _FREE_MODELS: list[str] = [
     "meta-llama/llama-3.3-70b-instruct:free",
-    "deepseek/deepseek-r1:free",
-    "google/gemma-3-27b-it:free",
+    "meta-llama/llama-3.1-8b-instruct:free",
     "mistralai/mistral-7b-instruct:free",
-    "microsoft/phi-3-mini-128k-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "qwen/qwen-2.5-7b-instruct:free",
 ]
 
 _SYSTEM_PROMPT = """\
@@ -416,11 +417,14 @@ class AIResearchStrategy(Strategy):
 
             resp = await self._http.post(OPENROUTER_BASE_URL, json=payload, headers=headers)
 
-            if resp.status_code == 429:
+            if resp.status_code in (404, 429):
+                reason = "not_found" if resp.status_code == 404 else "rate_limited"
+                next_model = _FREE_MODELS[(self._model_index + 1) % len(_FREE_MODELS)]
                 log.warning(
-                    "ai_research.rate_limited",
+                    f"ai_research.{reason}",
                     model=model,
-                    rotating_to=_FREE_MODELS[(self._model_index + 1) % len(_FREE_MODELS)],
+                    status=resp.status_code,
+                    rotating_to=next_model,
                 )
                 self._model_index = (self._model_index + 1) % len(_FREE_MODELS)
                 tried += 1
