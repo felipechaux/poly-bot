@@ -1,23 +1,23 @@
 """
 AI Research Strategy
 --------------------
-Uses Groq (Llama 3.3 70B, free tier) + DuckDuckGo search (no key needed)
-to estimate the TRUE probability of each market resolving YES, then trades
-when the estimate differs significantly from the current market price.
+Uses OpenRouter (multiple free models with auto-rotation) + DuckDuckGo search
+(no key needed) to estimate the TRUE probability of each market resolving YES,
+then trades when the estimate differs significantly from the current market price.
 
 Flow (per market, every research_interval_min):
   1. Search DuckDuckGo for recent news about the market question (free, no key)
-  2. Pass the top results to Llama 3.3 70B via Groq API
-  3. Llama returns a structured estimate: {probability_yes, confidence, reasoning, key_factors}
+  2. Pass the top results to an LLM via OpenRouter API
+  3. LLM returns a structured estimate: {probability_yes, confidence, reasoning, key_factors}
   4. Compare vs market price → compute "edge"
   5. If edge > min_edge_pct and confidence >= min_confidence → generate signal
 
-Free tier (Groq):
-  - 14,400 requests/day on Llama 3.3 70B
-  - No credit card required
-  - Get key at: console.groq.com → API Keys → Create
+Free tier (OpenRouter):
+  - Multiple free models available (rotates automatically on rate-limit)
+  - No credit card required for free models
+  - Get key at: openrouter.ai → API Keys → Create
 
-Required env var: GROQ_API_KEY
+Required env var: OPENROUTER_API_KEY
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from groq import AsyncGroq
+import httpx
 
 from poly_bot.execution.models import Fill
 from poly_bot.observability.logging import get_logger
@@ -41,6 +41,18 @@ log = get_logger(__name__)
 
 Confidence = Literal["low", "medium", "high", "very_high"]
 CONFIDENCE_ORDER = {"low": 0, "medium": 1, "high": 2, "very_high": 3}
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# Free models on OpenRouter — rotated automatically when one hits its rate limit.
+# All end with :free so they have no per-token cost.
+_FREE_MODELS: list[str] = [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "deepseek/deepseek-r1:free",
+    "google/gemma-3-27b-it:free",
+    "mistralai/mistral-7b-instruct:free",
+    "microsoft/phi-3-mini-128k-instruct:free",
+]
 
 _SYSTEM_PROMPT = """\
 You are an expert prediction market analyst. You will be given a market question
@@ -97,13 +109,16 @@ class AIResearchStrategy(Strategy):
         self._last_cycle_reset = datetime.utcnow()
         self._event_callback: Callable[[dict], None] | None = None
 
-        api_key = os.environ.get("GROQ_API_KEY", "")
+        api_key = os.environ.get("OPENROUTER_API_KEY", "")
         if not api_key:
             raise RuntimeError(
-                "GROQ_API_KEY is not set. "
-                "Get a free key at console.groq.com → API Keys → Create."
+                "OPENROUTER_API_KEY is not set. "
+                "Get a free key at openrouter.ai → API Keys → Create."
             )
-        self._client = AsyncGroq(api_key=api_key)
+        self._api_key = api_key
+        self._http = httpx.AsyncClient(timeout=60.0)
+        # Tracks which model index to use next; rotates forward on rate-limit.
+        self._model_index = 0
 
     def on_agent_event(self, callback: Callable[[dict], None]) -> None:
         """Register a callback to receive agent activity events."""
@@ -355,10 +370,12 @@ class AIResearchStrategy(Strategy):
             return ""
 
     async def _call_llm(self, question: str) -> dict[str, Any]:
-        """Search DuckDuckGo then ask Llama 3.3 70B via Groq to estimate probability."""
+        """Search DuckDuckGo then call an LLM via OpenRouter to estimate probability.
+
+        Rotates through _FREE_MODELS automatically when a model returns 429.
+        """
         search_results = await self._search_web(question)
 
-        # No search results → can't form an informed view, return low confidence
         if not search_results:
             log.warning("ai_research.no_search_results", question=question[:60])
             return {
@@ -375,35 +392,67 @@ class AIResearchStrategy(Strategy):
             f"Respond with ONLY the JSON object."
         )
 
-        response = await self._client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
+        payload = {
+            "messages": [
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
             ],
-            temperature=0.1,
-            max_tokens=512,
+            "temperature": 0.1,
+            "max_tokens": 512,
+        }
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/poly-bot",
+            "X-Title": "poly-bot",
+        }
+
+        # Try each model in rotation; on 429 advance to the next one.
+        tried = 0
+        while tried < len(_FREE_MODELS):
+            model = _FREE_MODELS[self._model_index % len(_FREE_MODELS)]
+            payload["model"] = model
+            log.debug("ai_research.llm_request", model=model, question=question[:60])
+
+            resp = await self._http.post(OPENROUTER_BASE_URL, json=payload, headers=headers)
+
+            if resp.status_code == 429:
+                log.warning(
+                    "ai_research.rate_limited",
+                    model=model,
+                    rotating_to=_FREE_MODELS[(self._model_index + 1) % len(_FREE_MODELS)],
+                )
+                self._model_index = (self._model_index + 1) % len(_FREE_MODELS)
+                tried += 1
+                continue
+
+            resp.raise_for_status()
+            data = resp.json()
+            text = (data["choices"][0]["message"]["content"] or "").strip()
+            if not text:
+                raise ValueError(f"OpenRouter/{model} returned empty response")
+
+            # Strip markdown code fences if present
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+
+            parsed = json.loads(text)
+            prob = float(parsed["probability_yes"])
+            parsed["probability_yes"] = max(0.01, min(0.99, prob))
+
+            if parsed.get("confidence") not in ("low", "medium", "high", "very_high"):
+                parsed["confidence"] = "medium"
+
+            log.debug("ai_research.llm_success", model=model)
+            return parsed
+
+        raise RuntimeError(
+            f"All {len(_FREE_MODELS)} OpenRouter free models are rate-limited. "
+            "Try again later or add OPENROUTER_API_KEY with paid credits."
         )
-
-        text = (response.choices[0].message.content or "").strip()
-        if not text:
-            raise ValueError("Groq returned empty response")
-
-        # Strip markdown code fences if present
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-
-        parsed = json.loads(text)
-        prob = float(parsed["probability_yes"])
-        parsed["probability_yes"] = max(0.01, min(0.99, prob))
-
-        if parsed.get("confidence") not in ("low", "medium", "high", "very_high"):
-            parsed["confidence"] = "medium"
-
-        return parsed
 
     async def on_fill(self, fill: Fill, ctx: StrategyContext) -> list[Signal]:
         return []
 
     async def on_stop(self) -> None:
-        await self._client.close()
+        await self._http.aclose()
