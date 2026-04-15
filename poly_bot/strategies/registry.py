@@ -17,7 +17,15 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
 
 
 def load_strategies(strategy_configs: dict[str, Any]) -> list[Strategy]:
-    """Instantiate all enabled strategies from config."""
+    """Instantiate all enabled strategies from config.
+
+    Strategies that fail to initialise (e.g. missing API key) are skipped with
+    a warning so the rest of the bot — including the web server and healthcheck
+    — can still start normally.
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+
     strategies: list[Strategy] = []
     for name, cfg in strategy_configs.items():
         if not isinstance(cfg, dict) or not cfg.get("enabled", False):
@@ -25,5 +33,8 @@ def load_strategies(strategy_configs: dict[str, Any]) -> list[Strategy]:
         cls = STRATEGY_REGISTRY.get(name)
         if cls is None:
             raise ValueError(f"Unknown strategy: '{name}'. Available: {list(STRATEGY_REGISTRY)}")
-        strategies.append(cls(cfg))
+        try:
+            strategies.append(cls(cfg))
+        except Exception as exc:
+            _log.warning("strategy.init_failed — skipping '%s': %s", name, exc)
     return strategies
