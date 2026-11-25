@@ -12,11 +12,13 @@ services:
         required: false
     environment:
       TZ: America/Bogota
+      CLAUDE_CONFIG_DIR: /home/botuser/.claude
     ports:
       - "127.0.0.1:8080:8080"       # solo local; acceso externo vía Caddy o túnel
     volumes:
       - ./data:/app/data            # SQLite (data/invest_bot.db)
       - ./config:/app/config:ro     # edita config/default.yaml sin reconstruir
+      - claude_auth:/home/botuser/.claude   # login de la suscripción Claude (persiste entre deploys)
     deploy:
       resources:
         limits:
@@ -61,5 +63,6 @@ services:
       - invest-bot
 
 volumes:
+  claude_auth:
   caddy_data:
   caddy_config:

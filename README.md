@@ -69,12 +69,17 @@ make tunnel-url                   # URL pública HTTPS del dashboard (para el iP
 - La Mac debe estar encendida y despierta a las 17:00; si el ciclo se perdió, corre al arrancar.
 - Ejecutar un ciclo real por API exige `ADMIN_TOKEN`; el botón de simulación (dry run) no.
 
-### Token de Claude (servidor)
+### Login de Claude en el servidor (suscripción, sin API key)
+
+Una sola vez, igual que en la Mac:
 
 ```bash
-claude setup-token      # en la Mac, abre el navegador; copia el token
-# en el servidor: agrega CLAUDE_CODE_OAUTH_TOKEN=... a ~/invest-bot/.env y reinicia
+ssh -t ubuntu@<servidor> 'cd ~/invest-bot && docker compose exec -it invest-bot claude'
+# dentro: /login → abre la URL en tu navegador, autoriza, pega el código → /exit
 ```
+
+La sesión se guarda en el volumen `claude_auth` (`CLAUDE_CONFIG_DIR`) y sobrevive a reinicios y
+deploys. Alternativa: `claude setup-token` en la Mac y `CLAUDE_CODE_OAUTH_TOKEN=...` en `.env`.
 
 ### Notificaciones al iPhone (ntfy)
 
