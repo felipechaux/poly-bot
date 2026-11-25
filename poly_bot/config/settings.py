@@ -20,6 +20,7 @@ YAML_SECTIONS = (
     "market_data",
     "costs",
     "risk",
+    "execution",
     "strategies",
     "universe",
 )
@@ -56,6 +57,7 @@ class Settings(BaseSettings):
     market_data: dict[str, Any] = Field(default_factory=dict)
     costs: dict[str, Any] = Field(default_factory=dict)
     risk: dict[str, Any] = Field(default_factory=dict)
+    execution: dict[str, Any] = Field(default_factory=dict)
     strategies: dict[str, Any] = Field(default_factory=dict)
     universe: list[dict[str, Any]] = Field(default_factory=list)
 

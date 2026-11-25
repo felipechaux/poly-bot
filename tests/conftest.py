@@ -46,8 +46,10 @@ def quotes() -> dict[str, Quote]:
 
 class FakeProvider:
     def __init__(self, prices: dict[str, float] | None = None, usdcop: float = USDCOP,
-                 dividends: dict[str, list[Dividend]] | None = None, as_of: date = TODAY) -> None:
+                 dividends: dict[str, list[Dividend]] | None = None, as_of: date = TODAY,
+                 opens: dict[str, float] | None = None) -> None:
         self.prices = dict(prices or PRICES)
+        self.opens = opens  # opening price of the `as_of` bar (defaults to the close)
         self.usdcop = usdcop
         self.dividends = dividends or {}
         self.as_of = as_of
@@ -59,4 +61,6 @@ class FakeProvider:
             quotes={t: q for t, q in quotes.items() if t in {a.ticker for a in assets}},
             dividends=self.dividends, usdcop=self.usdcop, usdcop_as_of=self.as_of,
             closes={t: pd.Series([p] * 3, index=idx) for t, p in self.prices.items()},
+            opens={t: pd.Series([p, p, (self.opens or {}).get(t, p)], index=idx)
+                   for t, p in self.prices.items()},
         )

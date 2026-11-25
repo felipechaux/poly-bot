@@ -14,9 +14,16 @@ portfolio:
 # --- Ciclo diario ---
 schedule:
   timezone: America/Bogota
-  daily_run_time: "08:00"       # antes de la apertura (NYSE ~8:30, BVC 9:30 Bogotá); usa cierres del día anterior
+  daily_run_time: "08:00"       # decide antes de la apertura (NYSE y BVC 9:30 Bogotá; NYSE 8:30 en horario de verano EE. UU.)
   run_on_start: true            # al arrancar, corre el ciclo si hoy aún no se ha corrido
   weekdays_only: true
+
+# --- Ejecución simulada ---
+execution:
+  fill: next_open               # next_open: BVC/EE. UU. se llenan a la apertura siguiente a la decisión
+                                #            (cripto, 24/7, al precio actual) · close: todo al último cierre
+  settle_time: "16:30"          # después del cierre: ejecuta las órdenes pendientes y envía un push
+  pending_max_days: 3           # días hábiles sin apertura disponible (p. ej. festivo) antes de vencer
 
 # --- Datos de mercado ---
 market_data:
@@ -82,6 +89,11 @@ strategies:
       max_new_per_day: 2
       min_confidence: 0.70      # solo ejecuta ideas con confianza >= 0.70
       stop_loss_pct: 0.15       # vende si una posición satélite cae 15% desde el costo
+      max_drawdown_pct: 0.10    # freno: si su cartera pierde 10% de su tope, deja de comprar (sí vende)
+      semaforo:                 # ¿escoge mejor que el azar? (exceso vs canasta de elegibles)
+        horizon_days: 7
+        min_n: 20               # gris hasta tener 20 ideas calificadas
+        t_threshold: 2.0        # verde/rojo solo con evidencia estadística (t ≥ 2); rojo → freno
       timeout_seconds: 300
       max_budget_usd: 1.00      # tope de costo equivalente por llamada (solo claude)
       news_max_items: 30

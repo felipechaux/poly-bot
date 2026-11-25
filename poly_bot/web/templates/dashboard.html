@@ -90,6 +90,12 @@
   </section>
 
   <section class="card">
+    <h2>Órdenes a la apertura</h2>
+    <p class="muted" id="orders-note"></p>
+    <div class="table-wrap"><table id="orders"></table></div>
+  </section>
+
+  <section class="card">
     <h2>Último resumen</h2>
     <pre id="summary">—</pre>
     <div class="controls" style="margin-top:10px">
@@ -205,8 +211,12 @@ function llm(d) {
   const hr = (a, h) => { const x = a.hit_rates?.[h]; return x?.hit_rate == null ? "—" :
     `${pct(x.hit_rate, false)} <span class="muted">(n=${x.n}, ${pct(x.avg_ret)})</span>`; };
   const cls = (v) => v > 0 ? "up" : v < 0 ? "down" : "";
+  const dot = { verde: "🟢", amarillo: "🟡", rojo: "🔴", gris: "⚪" };
   const rows = [
     ["Modelo", (a) => esc(a.model)],
+    ["Semáforo", (a) => `${dot[a.semaforo.color] || "⚪"} ${esc(a.semaforo.label)}` +
+      (a.semaforo.mean_excess == null ? "" : ` <span class="muted">(exceso ${pct(a.semaforo.mean_excess)} vs azar, ${a.semaforo.horizon_days}d)</span>`)],
+    ["Estado", (a) => a.guard ? `<span class="down">⛔ en pausa: ${esc(a.guard)}</span>` : '<span class="up">activo</span>'],
     ["P&L cartera", (a) => `<span class="${cls(a.sleeve.pnl)}">${money(a.sleeve.pnl, d.base_currency)}</span>
       <span class="muted">${pct(a.sleeve.pnl_pct)}</span>`],
     ["Invertido / tope", (a) => `${money(a.sleeve.value, d.base_currency)} / ${money(a.sleeve.cap, d.base_currency)}`],
@@ -229,12 +239,25 @@ function llm(d) {
       <td>${o(r.outcomes["1d"])}</td><td>${o(r.outcomes["7d"])}</td><td>${o(r.outcomes["30d"])}</td></tr>`).join("");
 }
 
+function orders(d) {
+  $("orders-note").textContent = d.fill_mode === "next_open"
+    ? `Se deciden a las 8:00 y se ejecutan al precio de apertura (BVC/EE. UU.); liquidación a las ${d.settle_time}. Cripto se ejecuta al momento.`
+    : "Modo cierre: las órdenes se ejecutan al último cierre.";
+  const st = { pending: "⏳ pendiente", filled: "✅ ejecutada", rejected: "⛔ rechazada", expired: "⌛ vencida", superseded: "↺ reemplazada" };
+  const rows = [...(d.pending || []), ...(d.recent || []).slice().reverse()].slice(0, 40);
+  $("orders").innerHTML = "<tr><th>Decidida</th><th>Estrategia</th><th>Orden</th><th>Monto</th><th>Estado</th><th>Nota</th></tr>" +
+    rows.map((o) => `<tr><td>${esc(new Date(o.decided_at).toLocaleString("es-CO"))}</td><td>${esc(o.strategy)}</td>
+      <td><b>${o.side === "BUY" ? "Compra" : "Venta"} ${esc(o.ticker)}</b></td>
+      <td>${o.value ? o.value.toLocaleString("es-CO", { maximumFractionDigits: 0 }) : (o.quantity ?? "") + " u."}</td>
+      <td>${st[o.status] || esc(o.status)}</td><td class="muted">${esc(o.note)}</td></tr>`).join("");
+}
+
 async function refresh() {
   try {
     const [s, p, pos, u, eq, t] = await Promise.all([get("/api/status"), get("/api/portfolio"),
       get("/api/positions"), get("/api/universe"), get("/api/equity"), get("/api/transactions?limit=100")]);
     $("mode").textContent = s.mode;
-    $("next").textContent = s.next_run_at ? "Próximo ciclo: " + new Date(s.next_run_at).toLocaleString("es-CO") : "";
+    $("next").textContent = s.next_run_at ? (s.next_job === "settle" ? "Próxima ejecución de órdenes: " : "Próxima decisión: ") + new Date(s.next_run_at).toLocaleString("es-CO") : "";
     if (s.last_cycle) $("summary").textContent = s.last_cycle.title + "\n\n" + s.last_cycle.message;
     universe = u.assets;
     const regions = [...new Set(universe.map((a) => a.region))].sort();
@@ -243,6 +266,7 @@ async function refresh() {
     alloc("alloc-currency", p.allocation?.currency); positions(pos.positions); renderUniverse();
     equity(eq.snapshots); txs(t.transactions);
     get("/api/llm").then(llm).catch(() => {});
+    get("/api/orders").then(orders).catch(() => {});
   } catch (e) { console.error(e); }
 }
 

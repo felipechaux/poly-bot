@@ -63,6 +63,7 @@ def create_app(bot: "Bot") -> FastAPI:
             "universe_size": len(bot.universe),
             "notify_enabled": bot.notifier.enabled,
             "next_run_at": bot.next_run_at.isoformat() if bot.next_run_at else None,
+            "next_job": bot.next_job,
             "last_cycle": {"day": str(lc.day), "title": lc.title, "message": lc.message,
                            "executed": len(lc.executed), "rejected": len(lc.rejected)} if lc else None,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -164,9 +165,7 @@ def create_app(bot: "Bot") -> FastAPI:
         by_rec: dict[int, dict[int, Any]] = defaultdict(dict)
         for o in outcomes:
             by_rec[o["payload"]["rec_id"]][o["payload"]["horizon_days"]] = o["payload"]
-        txs = await store.all_transactions()
         snap = bot.tracker.snapshot()
-        total = snap.total_value()
         today = datetime.now(bot.tz).date().isoformat()
 
         def _sum(evs: list[dict[str, Any]], key: str) -> float:
@@ -191,14 +190,7 @@ def create_app(bot: "Bot") -> FastAPI:
             todays = [a for a in mine if datetime.fromisoformat(a["occurred_at"])
                       .astimezone(bot.tz).date().isoformat() == today]
             latest = mine[-1] if mine else None
-            pos = [p for p in snap.positions if p.strategy == st.name]
-            unrealized = sum(snap.to(p.unrealized_pnl, p.currency) for p in pos)
-            realized = sum(snap.to(t.realized_pnl or 0.0, t.currency) for t in txs
-                           if t.strategy == st.name and t.kind == "SELL")
-            dividends = sum(snap.to(t.gross - t.fee, t.currency) for t in txs
-                            if t.strategy == st.name and t.kind == "DIVIDEND")
-            cap = st.p["sleeve_pct"] * total
-            pnl = unrealized + realized + dividends
+            status = await bot._analyst_status(st, snap)
             analysts.append({
                 "name": st.name, "label": st.label, "provider": st.provider, "model": st.p["model"],
                 "usage": {
@@ -217,11 +209,9 @@ def create_app(bot: "Bot") -> FastAPI:
                     "usage": latest["payload"].get("usage", {}),
                 } if latest else None,
                 "hit_rates": _hit_rates([o for o in outcomes if o["strategy"] == st.name]),
-                "sleeve": {
-                    "cap": cap, "value": sum(snap.value_of(p.ticker) for p in pos),
-                    "positions": [p.ticker for p in pos], "pnl": pnl,
-                    "pnl_pct": pnl / cap if cap else None,
-                },
+                "sleeve": status["sleeve"],
+                "semaforo": status["semaforo"].as_dict(),
+                "guard": status["guard"],
             })
         labels = {a["name"]: a["label"] for a in analysts}
         return {
@@ -238,11 +228,28 @@ def create_app(bot: "Bot") -> FastAPI:
             ],
         }
 
+    @app.get("/api/orders")
+    async def orders(limit: int = 50) -> dict[str, Any]:
+        """Orders waiting for the next open, plus recently closed ones."""
+        store = _store()
+        return {"fill_mode": bot.fill_mode, "settle_time": bot.settle_time,
+                "pending": await store.pending_orders(),
+                "recent": [o for o in await store.pending_orders(status=None, limit=limit)
+                           if o["status"] != "pending"]}
+
     @app.get("/api/events")
     async def events(limit: int = 100) -> dict[str, Any]:
         return {"events": await _store().recent_events(limit=limit)}
 
     # ── Actions ─────────────────────────────────────────────────────────────
+
+    @app.post("/api/settle")
+    async def settle(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """Fill pending orders whose opening price is known (admin)."""
+        _require_admin(authorization)
+        r = await bot.settle()
+        return {"executed": len(r.executed), "rejected": len(r.rejected), "title": r.title,
+                "message": r.message, "notified": r.notified}
 
     @app.post("/api/cycle")
     async def run_cycle(dry_run: bool = True, notify: bool = False,

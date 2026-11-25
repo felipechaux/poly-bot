@@ -117,3 +117,16 @@ async def test_sell_idea_reduces_held_position(universe):
     client = FakeClaude({"resumen_mercado": "x", "acciones": [idea("NU", accion="SELL", peso=0.0, conf=0.6)]})
     sigs = await strat(client).on_daily(ctx(universe, t))
     assert sigs[0].side == "SELL" and sigs[0].quantity == pytest.approx(40)
+
+
+async def test_guard_blocks_buys_but_keeps_exits(universe):
+    t = PositionTracker()
+    t.apply(Transaction(kind="DEPOSIT", currency="USD", gross=10_000.0))
+    t.apply(Transaction(kind="BUY", currency="USD", ticker="NU", quantity=10, price=10, gross=100,
+                        strategy="llm_analyst"))
+    client = FakeClaude({"resumen_mercado": "x", "acciones": [
+        idea("ECOPETROL.CL", conf=0.9), idea("NU", accion="SELL", peso=0, conf=0.8)]})
+    c = ctx(universe, t, guard="pérdida de -12.0% de su cartera")
+    sigs = await strat(client).on_daily(c)
+    assert [(s.ticker, s.side) for s in sigs] == [("NU", "SELL")]
+    assert any("en pausa" in n for n in c.notes)
