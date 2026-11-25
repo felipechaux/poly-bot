@@ -1,0 +1,5 @@
+# HTTPS automático (Let's Encrypt). DOMAIN viene del .env del servidor.
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy invest-bot:8080
+}

@@ -73,7 +73,7 @@ docker-build:  ## Build Docker image
 	docker compose build
 
 docker-run:  ## Run bot in Docker (paper mode)
-	docker compose up -d --build
+	docker compose --profile tunnel up -d --build
 	@echo "✓ Bot running in Docker. Logs: make docker-logs"
 
 docker-stop:  ## Stop Docker container
