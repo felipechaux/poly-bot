@@ -3,7 +3,7 @@
 set -euo pipefail
 cd /home/ubuntu/invest-bot
 git fetch --quiet origin main
-git reset --hard origin/main
+git checkout -q -B main origin/main   # also moves off any feature branch
 docker compose --profile prod up -d --build --remove-orphans
 docker image prune -f >/dev/null
 sleep 5
