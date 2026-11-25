@@ -20,13 +20,20 @@ yfinance (cierres + dividendos + USD/COP)
 
 - **Estrategia `core_allocation`** (85% de la cartera): pesos fijos (60% global, 20% Colombia, 10% bonos,
   10% oro/cripto), rebalanceo el primer ciclo de cada mes o si un activo se desvía > 5 pp.
-- **Estrategia `llm_analyst`** (cartera satélite, máx. 15%): **una** llamada diaria a `claude -p` con tu
-  suscripción (sin API key; el bot elimina `ANTHROPIC_API_KEY` del entorno). Recibe indicadores del
-  universo (sin los tickers de la core), la cartera, su historial de aciertos y ~30 titulares RSS; responde
-  JSON con esquema fijo. Límites duros: confianza ≥ 0.70, ≤ 5% por posición, ≤ 5 posiciones, ≤ 2 entradas
-  nuevas/día, stop-loss −15%. Cada idea queda en una bitácora con su resultado a 1/7/30 días.
-  Consumo medido: ~9k tokens por llamada (~US$ 0,04 equivalente, incluido en el plan), visible en el
-  dashboard y en el resumen diario. El botón de dry run nunca llama a Claude.
+- **Analistas IA `llm_claude` y `llm_gemini`** (7,5% de la cartera cada uno): cada mañana reciben los
+  mismos datos (indicadores del universo sin los tickers de la core, la cartera, su propio historial de
+  aciertos y ~30 titulares RSS) y responden JSON con esquema fijo. Cada uno opera su propia cartera
+  satélite y no puede comprar lo que ya tiene el otro, así que el dashboard los compara lado a lado
+  (P&L, % de acierto a 1/7/30 días, tokens).
+  - Claude: `claude -p`, Opus 5.5, con tu suscripción. El bot elimina `ANTHROPIC_API_KEY` del entorno.
+    Medido: ~9k tokens y ~20 s por llamada (~US$ 0,08 equivalente, incluido en el plan).
+  - Gemini: `agy -p` (Antigravity CLI), Gemini 4 Neon High, con tu cuenta de Google. El bot elimina
+    `GEMINI_API_KEY`/`GOOGLE_API_KEY` y le pasa un entorno mínimo. Como `agy` no permite desactivar sus
+    herramientas, cada llamada corre en una carpeta vacía con `--sandbox`, modo plan y reglas que
+    niegan leer o escribir archivos, comandos, URLs y MCP. Medido: ~56k tokens y ~170 s por llamada.
+  - Límites duros por analista: confianza ≥ 0.70, ≤ 4% por posición, ≤ 3 posiciones, ≤ 2 entradas
+    nuevas/día, stop-loss −15%. Cada idea queda en la bitácora con su resultado. El botón de dry run
+    nunca llama a ningún modelo.
 - **Costos simulados**: BVC 0,3% (mín. $10.000 COP) + slippage 0,2%, acciones enteras;
   EE. UU. 0,1% (mín. US$1), fraccionadas; cripto 0,1%; spread FX COP↔USD 0,5%.
 - **Riesgo**: lista blanca (universo), peso máx. por activo / clase / región, precios desactualizados, sin cortos.
@@ -80,6 +87,16 @@ ssh -t ubuntu@<servidor> 'cd ~/invest-bot && docker compose exec -it invest-bot 
 
 La sesión se guarda en el volumen `claude_auth` (`CLAUDE_CONFIG_DIR`) y sobrevive a reinicios y
 deploys. Alternativa: `claude setup-token` en la Mac y `CLAUDE_CODE_OAUTH_TOKEN=...` en `.env`.
+
+### Login de Gemini (Antigravity CLI) en el servidor
+
+```bash
+ssh -t ubuntu@<servidor> 'cd ~/invest-bot && docker compose exec -it invest-bot agy'
+# abre la URL en tu navegador (únela si sale partida), autoriza, pega el código → /exit
+```
+
+La sesión se guarda en el volumen `gemini_auth` (`~/.gemini`). `agy` está fijado a una versión con su
+SHA-512 en el `Dockerfile` (el manifest oficial indica cómo actualizarlo).
 
 ### Notificaciones al iPhone (ntfy)
 

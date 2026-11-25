@@ -56,7 +56,7 @@ strategies:
       rebalance: monthly        # primer ciclo hábil de cada mes
       drift_band: 0.05          # o si un activo se desvía > 5 pp del objetivo
       cash_buffer_pct: 0.01     # deja 1% en caja para comisiones
-      portfolio_share: 0.85     # la core usa 85%; el 15% restante es la cartera satélite del LLM
+      portfolio_share: 0.85     # la core usa 85%; el 15% restante: 7,5% Claude + 7,5% Gemini
       targets:                  # pesos dentro de la core (deben sumar 1.0)
         VT: 0.45                # global
         QQQ: 0.15               # global (tech US)
@@ -67,20 +67,23 @@ strategies:
         GLD: 0.07               # oro
         BTC-USD: 0.03           # cripto
 
-  # Analista LLM: 1 llamada diaria a `claude -p` (suscripción, sin API key).
-  # Solo opera tickers del universo que NO están en la core, dentro de la cartera satélite.
-  llm_analyst:
+  # Analistas LLM: cada uno hace 1 llamada diaria con su CLI (suscripción, sin API keys) y maneja
+  # su propia cartera satélite. Mismos datos y reglas → se comparan en el dashboard.
+  # Solo operan tickers del universo que NO están en la core ni en la cartera del otro analista.
+  llm_claude:
+    class: llm_analyst
     enabled: true
-    params:
-      model: sonnet
-      sleeve_pct: 0.15          # máx. del total que maneja el LLM
-      max_position_pct: 0.05    # máx. por posición (del total)
-      max_positions: 5
+    params: &llm_params
+      provider: claude          # claude -p (Claude Code, tu suscripción)
+      model: opus               # Claude Opus 5.5
+      sleeve_pct: 0.075         # máx. del total que maneja este analista
+      max_position_pct: 0.04    # máx. por posición (del total)
+      max_positions: 3
       max_new_per_day: 2
       min_confidence: 0.70      # solo ejecuta ideas con confianza >= 0.70
       stop_loss_pct: 0.15       # vende si una posición satélite cae 15% desde el costo
       timeout_seconds: 300
-      max_budget_usd: 1.00      # tope de costo equivalente por llamada (--max-budget-usd)
+      max_budget_usd: 1.00      # tope de costo equivalente por llamada (solo claude)
       news_max_items: 30
       news_max_age_hours: 48
       feeds:
@@ -90,6 +93,15 @@ strategies:
         - {name: "Google News CO",  url: "https://news.google.com/rss/search?q=bolsa+de+valores+colombia+OR+colcap+OR+ecopetrol&hl=es-419&gl=CO&ceid=CO:es-419"}
         - {name: "CNBC",            url: "https://www.cnbc.com/id/100003114/device/rss/rss.html"}
         - {name: "MarketWatch",     url: "https://feeds.content.dowjones.io/public/rss/mw_topstories"}
+
+  llm_gemini:
+    class: llm_analyst
+    enabled: true
+    params:
+      <<: *llm_params
+      provider: agy             # agy -p (Antigravity CLI, tu cuenta de Google)
+      model: gemini-4-neon-high
+      timeout_seconds: 420      # agy razona más largo (medido: ~170 s, ~56k tokens por llamada)
 
 # --- Universo seguido ---
 # market: BVC | US | CRYPTO  ·  currency se infiere del market (BVC→COP, resto→USD)

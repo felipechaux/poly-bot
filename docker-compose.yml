@@ -19,10 +19,11 @@ services:
       - ./data:/app/data            # SQLite (data/invest_bot.db)
       - ./config:/app/config:ro     # edita config/default.yaml sin reconstruir
       - claude_auth:/home/botuser/.claude   # login de la suscripción Claude (persiste entre deploys)
+      - gemini_auth:/home/botuser/.gemini   # login de Antigravity / Gemini (agy)
     deploy:
       resources:
         limits:
-          memory: 900m             # bot + claude CLI during the daily call
+          memory: 900m             # bot + claude / agy CLI during the daily calls (one at a time)
     logging:
       driver: json-file
       options:
@@ -64,5 +65,6 @@ services:
 
 volumes:
   claude_auth:
+  gemini_auth:
   caddy_data:
   caddy_config:

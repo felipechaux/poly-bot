@@ -1,5 +1,8 @@
 """
-LLM analyst — one `claude -p` call per day manages a small satellite sleeve.
+LLM analyst — one headless CLI call per day manages a small satellite sleeve.
+
+Several instances can run side by side (e.g. `llm_claude` with `claude -p` and `llm_gemini` with
+`agy -p`), each with its own sleeve, so their decisions can be compared on the same data.
 
 Flow per daily cycle:
   1. Stop-loss on sleeve positions (no LLM needed).
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable
 
+from poly_bot.llm.agy_cli import AgyCLI
 from poly_bot.llm.claude_cli import ClaudeCLI, ClaudeError, ClaudeResult
 from poly_bot.llm.prompts import SYSTEM_PROMPT, build_prompt, build_schema
 from poly_bot.news.rss import Headline, fetch_headlines
@@ -27,12 +31,13 @@ log = get_logger(__name__)
 
 NewsFetcher = Callable[..., Awaitable[list[Headline]]]
 EXIT_MIN_CONFIDENCE = 0.5  # exits are allowed on weaker conviction than entries
+PROVIDER_LABELS = {"claude": "Claude", "agy": "Gemini"}
 
 
 class LLMAnalystStrategy(Strategy):
     @property
     def name(self) -> str:
-        return "llm_analyst"
+        return str(self._config.get("name") or "llm_analyst")
 
     def __init__(self, config: dict[str, Any], client: Any | None = None,
                  news_fetcher: NewsFetcher | None = None) -> None:
@@ -49,16 +54,26 @@ class LLMAnalystStrategy(Strategy):
         self.feeds: list[dict[str, str]] = list(self._param("feeds", []) or [])
         self.news_max_items = int(self._param("news_max_items", 30))
         self.news_max_age_hours = float(self._param("news_max_age_hours", 48))
-        self.client = client or ClaudeCLI(
-            model=self.p["model"],
-            timeout_seconds=float(self._param("timeout_seconds", 300)),
-            max_budget_usd=float(self._param("max_budget_usd", 1.0)),
-        )
+        self.provider = str(self._param("provider", "claude"))
+        self.label = str(self._param("label", PROVIDER_LABELS.get(self.provider, self.provider)))
+        timeout = float(self._param("timeout_seconds", 300))
+        if client is not None:
+            self.client = client
+        elif self.provider == "claude":
+            self.client = ClaudeCLI(model=self.p["model"], timeout_seconds=timeout,
+                                    max_budget_usd=float(self._param("max_budget_usd", 1.0)))
+        elif self.provider == "agy":
+            self.client = AgyCLI(model=self.p["model"], timeout_seconds=timeout)
+        else:
+            raise ValueError(f"{self.name}: unknown provider '{self.provider}' (claude | agy)")
         self.news_fetcher: NewsFetcher = news_fetcher or fetch_headlines
         self.excluded: set[str] = set(self._param("exclude", []) or [])
 
     def eligible(self, ctx: DailyContext) -> list[str]:
-        return [t for t in ctx.universe.tickers if t not in self.excluded and t in ctx.quotes]
+        """Universe minus core targets minus tickers another strategy already holds."""
+        others = {p.ticker for p in ctx.portfolio.positions if p.strategy != self.name}
+        return [t for t in ctx.universe.tickers
+                if t not in self.excluded and t not in others and t in ctx.quotes]
 
     # ------------------------------------------------------------------
 
@@ -87,7 +102,7 @@ class LLMAnalystStrategy(Strategy):
             log.info("llm.cached_analysis")
             return dict(cached)
         if ctx.extra.get("dry_run"):
-            ctx.notes.append("🤖 Claude: no se llama en dry run")
+            ctx.notes.append(f"🤖 {self.label}: no se llama en dry run")
             return None
 
         eligible = self.eligible(ctx)
@@ -101,11 +116,11 @@ class LLMAnalystStrategy(Strategy):
         except ClaudeError as exc:
             log.error("llm.call_failed", error=str(exc))
             ctx.events.append({"event_type": "error", "strategy": self.name,
-                               "reasoning": f"claude: {exc}"})
-            ctx.notes.append(f"⚠️ Claude falló hoy: {str(exc)[:120]}")
+                               "reasoning": f"{self.provider}: {exc}"})
+            ctx.notes.append(f"⚠️ {self.label} falló hoy: {str(exc)[:120]}")
             return None
 
-        analysis = {**result.output, "usage": result.usage.as_dict(),
+        analysis = {**result.output, "usage": result.usage.as_dict(), "provider": self.provider,
                     "prompt_chars": len(prompt), "headlines": len(headlines)}
         ctx.events.append({"event_type": "analysis", "strategy": self.name,
                            "reasoning": str(result.output.get("resumen_mercado", ""))[:1000],
@@ -179,9 +194,10 @@ class LLMAnalystStrategy(Strategy):
         if not cached:
             tokens = int(usage.get("total_tokens", 0))
             ctx.notes.append(
-                f"🤖 Claude ({usage.get('model') or self.p['model']}): {len(ideas)} ideas, "
+                f"🤖 {self.label} ({usage.get('model') or self.p['model']}): {len(ideas)} ideas, "
                 f"{n_exec} a ejecutar · {tokens / 1000:.1f}k tokens"
-                f" (~US$ {float(usage.get('cost_usd_equiv', 0)):.3f} equiv., incluido en tu plan)")
+                + (f" (~US$ {cost:.3f} equiv., incluido en tu plan)"
+                   if (cost := float(usage.get('cost_usd_equiv', 0) or 0)) else " (incluido en tu plan)"))
             resumen = str(analysis.get("resumen_mercado", "")).strip()
             if resumen:
                 ctx.notes.append("   " + resumen[:220] + ("…" if len(resumen) > 220 else ""))

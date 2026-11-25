@@ -209,7 +209,6 @@ class Bot:
 
             if not dry_run:
                 await self._score_recommendations(md, today)
-            track_record = await self._track_record()
 
             strategy_notes: list[str] = []
             for strategy in self.strategies:
@@ -221,7 +220,7 @@ class Bot:
                     extra={
                         "dry_run": dry_run,
                         "cached_analysis": await self._todays_event(strategy.name, "analysis", today),
-                        "track_record": track_record,
+                        "track_record": await self._track_record(strategy.name),
                     },
                 )
                 signals = await strategy.on_daily(ctx)
@@ -310,13 +309,13 @@ class Bot:
                              "planned": p.get("planned", False), "confianza": p.get("confianza")},
                 )
 
-    async def _track_record(self, limit: int = 8) -> str:
+    async def _track_record(self, strategy: str | None = None, limit: int = 8) -> str:
         """Compact text of recent recommendations + 7-day outcomes, fed back to the LLM."""
         assert self.store is not None
         since = datetime.now(timezone.utc) - timedelta(days=60)
         outcomes = {(o["payload"]["rec_id"], o["payload"]["horizon_days"]): o["payload"]
                     for o in await self.store.events("outcome", since=since)}
-        recs = (await self.store.events("recommendation", since=since))[-limit:]
+        recs = (await self.store.events("recommendation", since=since, strategy=strategy))[-limit:]
         lines = []
         for r in recs:
             day = r["occurred_at"][:10]
