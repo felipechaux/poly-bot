@@ -1,3 +1,6 @@
+# Uso:
+#   Servidor (Lightsail):  docker compose --profile prod up -d --build    → bot + Caddy (HTTPS)
+#   Local con túnel:       docker compose --profile tunnel up -d --build  → bot + Cloudflare quick tunnel
 services:
   invest-bot:
     build: .
@@ -10,27 +13,53 @@ services:
     environment:
       TZ: America/Bogota
     ports:
-      - "127.0.0.1:8080:8080"       # solo local; el iPhone entra por el túnel
+      - "127.0.0.1:8080:8080"       # solo local; acceso externo vía Caddy o túnel
     volumes:
       - ./data:/app/data            # SQLite (data/invest_bot.db)
-      - ./config:/app/config:ro     # edit config/default.yaml without rebuilding
+      - ./config:/app/config:ro     # edita config/default.yaml sin reconstruir
     deploy:
       resources:
         limits:
-          memory: 768m
-          cpus: "1.0"
+          memory: 600m
     logging:
       driver: json-file
       options:
         max-size: "20m"
         max-file: "3"
 
-  # Túnel rápido de Cloudflare (sin cuenta): expone el dashboard por HTTPS en una URL
-  # aleatoria *.trycloudflare.com que cambia en cada reinicio. Ver: make tunnel-url
+  caddy:
+    profiles: ["prod"]
+    image: caddy:2.8.4-alpine
+    container_name: invest-bot-caddy
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - invest-bot
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  # Túnel rápido de Cloudflare (sin cuenta): URL aleatoria *.trycloudflare.com. Ver: make tunnel-url
   tunnel:
+    profiles: ["tunnel"]
     image: cloudflare/cloudflared:2026.3.0
     container_name: invest-bot-tunnel
     restart: unless-stopped
     command: tunnel --no-autoupdate --url http://invest-bot:8080
     depends_on:
       - invest-bot
+
+volumes:
+  caddy_data:
+  caddy_config:
