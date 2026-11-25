@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Protocol
 
@@ -34,6 +34,7 @@ class MarketData:
     usdcop: float
     usdcop_as_of: date
     closes: dict[str, pd.Series]
+    opens: dict[str, pd.Series] = field(default_factory=dict)  # daily opens, for next-open fills
 
 
 class PriceProvider(Protocol):
@@ -130,6 +131,7 @@ class YFinanceProvider:
         quotes: dict[str, Quote] = {}
         dividends: dict[str, list[Dividend]] = {}
         closes: dict[str, pd.Series] = {}
+        opens: dict[str, pd.Series] = {}
         for asset in assets:
             df = frames.get(asset.ticker)
             if df is None:
@@ -139,6 +141,9 @@ class YFinanceProvider:
                 continue
             close = df["Close"].astype(float)
             closes[asset.ticker] = close
+            if "Open" in df:
+                op = df["Open"].astype(float)
+                opens[asset.ticker] = op[op > 0].dropna()
             quotes[asset.ticker] = Quote(
                 ticker=asset.ticker,
                 price=float(close.iloc[-1]),
@@ -165,4 +170,5 @@ class YFinanceProvider:
             usdcop=float(fx_close.iloc[-1]),
             usdcop_as_of=fx_close.index[-1].date(),
             closes=closes,
+            opens=opens,
         )

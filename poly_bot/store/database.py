@@ -78,6 +78,24 @@ CREATE TABLE IF NOT EXISTS agent_events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_time     ON agent_events(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_events_strategy ON agent_events(strategy, event_type);
+
+-- Orders decided before the open, filled later at the next session's opening price
+CREATE TABLE IF NOT EXISTS pending_orders (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    decided_at  TEXT NOT NULL,      -- UTC ISO; fills only at an open strictly after this
+    strategy    TEXT NOT NULL,
+    ticker      TEXT NOT NULL,
+    side        TEXT NOT NULL,      -- BUY | SELL
+    value       REAL,               -- asset currency (BUY)
+    quantity    REAL,               -- shares (SELL / sell-all)
+    rationale   TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'pending',  -- pending | filled | rejected | expired | superseded
+    note        TEXT NOT NULL DEFAULT '',
+    tx_id       TEXT,
+    fill_day    TEXT,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_orders(status);
 """
 
 

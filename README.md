@@ -34,6 +34,16 @@ yfinance (cierres + dividendos + USD/COP)
   - Límites duros por analista: confianza ≥ 0.70, ≤ 4% por posición, ≤ 3 posiciones, ≤ 2 entradas
     nuevas/día, stop-loss −15%. Cada idea queda en la bitácora con su resultado. El botón de dry run
     nunca llama a ningún modelo.
+- **Ejecución a la apertura**: a las 8:00 se decide y las órdenes de BVC y EE. UU. quedan pendientes;
+  a las 16:30 se ejecutan al **precio de apertura** de la primera sesión posterior a la decisión (nunca
+  a una apertura ya conocida) y llega un push con lo ejecutado. Cripto (24/7) se ejecuta al momento.
+  Una nueva decisión reemplaza las órdenes pendientes de esa estrategia; sin apertura en 3 días
+  hábiles, la orden vence. `execution.fill: close` vuelve al modo anterior (todo al último cierre).
+- **Semáforo por analista**: cada idea se compara con una canasta equiponderada de los activos que
+  pudo escoger, en la misma ventana (exceso = retorno de la idea − canasta). Gris con < 20 ideas a 7
+  días; verde o rojo solo con t ≥ 2 a favor o en contra; amarillo en otro caso.
+- **Freno automático**: si la cartera de un analista pierde 10% de su tope o su semáforo se pone rojo,
+  deja de comprar (sí puede vender y el stop-loss sigue activo) y el resumen diario lo avisa.
 - **Costos simulados**: BVC 0,3% (mín. $10.000 COP) + slippage 0,2%, acciones enteras;
   EE. UU. 0,1% (mín. US$1), fraccionadas; cripto 0,1%; spread FX COP↔USD 0,5%.
 - **Riesgo**: lista blanca (universo), peso máx. por activo / clase / región, precios desactualizados, sin cortos.

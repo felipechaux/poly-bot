@@ -20,6 +20,7 @@ def settings(tmp_path) -> Settings:
         schedule={"timezone": "America/Bogota", "daily_run_time": "17:00", "run_on_start": False},
         market_data={"max_stale_days": 5000},
         costs={"fx_spread_pct": 0.005},
+        execution={"fill": "close"},
         risk={"max_weight_per_asset": 0.7, "min_order_value_usd": 25.0},
         strategies={"core_allocation": {"enabled": True, "params": {
             "targets": {"VT": 0.6, "ICOLCAP.CL": 0.3, "BTC-USD": 0.1}, "cash_buffer_pct": 0.01}}},
@@ -158,6 +159,9 @@ async def test_llm_cycle_journal_scoring_and_api(tmp_path, monkeypatch):
     outcomes = await bot.store.events("outcome")  # type: ignore[union-attr]
     assert {o["payload"]["horizon_days"] for o in outcomes} == {1, 7}
     assert all(o["payload"]["hit"] for o in outcomes)
+    # FakeProvider's close history is flat, so the basket return is 0 and excess = NU's +20%
+    assert all(o["payload"]["basket_ret"] == 0 for o in outcomes)
+    assert all(abs(o["payload"]["excess"] - 0.20) < 1e-9 for o in outcomes)
 
     with TestClient(create_app(bot)) as client:
         d = client.get("/api/llm").json()
@@ -166,6 +170,7 @@ async def test_llm_cycle_journal_scoring_and_api(tmp_path, monkeypatch):
     assert a["usage"]["calls_30d"] == 2 and a["usage"]["tokens_30d"] == 2400
     assert a["hit_rates"]["7d"]["hit_rate"] == 1.0
     assert a["sleeve"]["positions"] == ["NU"] and a["sleeve"]["pnl"] > 0
+    assert a["semaforo"]["color"] == "gris" and a["semaforo"]["n"] == 1 and a["guard"] is None
     assert d["journal"][-1]["outcomes"]["7d"]["hit"] is True
     assert d["journal"][-1]["analyst"] == "Claude"
     await bot._shutdown()

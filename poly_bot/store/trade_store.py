@@ -216,3 +216,43 @@ class TradeStore:
         )
         r = await cur.fetchone()
         return datetime.fromisoformat(r[0]) if r else None
+
+    # ── Pending orders (next-open fills) ────────────────────────────────
+
+    async def supersede_pending(self, strategy: str) -> int:
+        """A new decision replaces any order the strategy still has waiting."""
+        cur = await self._conn.execute(
+            "UPDATE pending_orders SET status='superseded', note='reemplazada por una nueva decisión',"
+            " updated_at=? WHERE strategy=? AND status='pending'",
+            (utcnow().isoformat(), strategy),
+        )
+        await self._conn.commit()
+        return cur.rowcount or 0
+
+    async def add_pending(self, decided_at: datetime, strategy: str, ticker: str, side: str,
+                          value: float | None, quantity: float | None, rationale: str) -> int:
+        cur = await self._conn.execute(
+            "INSERT INTO pending_orders (decided_at, strategy, ticker, side, value, quantity,"
+            " rationale, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (decided_at.isoformat(), strategy, ticker, side, value, quantity, rationale,
+             utcnow().isoformat()),
+        )
+        await self._conn.commit()
+        return int(cur.lastrowid or 0)
+
+    async def pending_orders(self, status: str | None = "pending", limit: int = 200) -> list[dict[str, Any]]:
+        sql, args = "SELECT * FROM pending_orders", []
+        if status is not None:
+            sql += " WHERE status=?"
+            args.append(status)
+        cur = await self._conn.execute(sql + " ORDER BY id DESC LIMIT ?", [*args, limit])
+        return [dict(r) for r in reversed(list(await cur.fetchall()))]
+
+    async def close_pending(self, order_id: int, status: str, note: str = "",
+                            tx_id: str | None = None, fill_day: date | None = None) -> None:
+        await self._conn.execute(
+            "UPDATE pending_orders SET status=?, note=?, tx_id=?, fill_day=?, updated_at=? WHERE id=?",
+            (status, note[:300], tx_id, fill_day.isoformat() if fill_day else None,
+             utcnow().isoformat(), order_id),
+        )
+        await self._conn.commit()

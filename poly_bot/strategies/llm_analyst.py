@@ -50,7 +50,12 @@ class LLMAnalystStrategy(Strategy):
             "max_new_per_day": int(self._param("max_new_per_day", 2)),
             "min_confidence": float(self._param("min_confidence", 0.7)),
             "stop_loss_pct": float(self._param("stop_loss_pct", 0.15)),
+            "max_drawdown_pct": float(self._param("max_drawdown_pct", 0.10)),
         }
+        sem = self._param("semaforo", {}) or {}
+        self.semaforo_cfg: dict[str, float] = {"horizon_days": int(sem.get("horizon_days", 7)),
+                             "min_n": int(sem.get("min_n", 20)),
+                             "t_threshold": float(sem.get("t_threshold", 2.0))}
         self.feeds: list[dict[str, str]] = list(self._param("feeds", []) or [])
         self.news_max_items = int(self._param("news_max_items", 30))
         self.news_max_age_hours = float(self._param("news_max_age_hours", 48))
@@ -140,6 +145,7 @@ class LLMAnalystStrategy(Strategy):
         n_positions = len(held)
         new_today = 0
         cached = bool(ctx.extra.get("cached_analysis"))
+        guard = ctx.extra.get("guard")  # paused: exits only, no new buys
 
         ideas = [i for i in analysis.get("acciones", []) if isinstance(i, dict)]
         ideas.sort(key=lambda i: -float(i.get("confianza", 0)))
@@ -157,7 +163,7 @@ class LLMAnalystStrategy(Strategy):
             why = f"Claude {conf:.2f}: {str(idea.get('razon', ''))}"[:300]
             planned: Signal | None = None
 
-            if action == "BUY" and conf >= self.p["min_confidence"] and t not in stopped:
+            if action == "BUY" and conf >= self.p["min_confidence"] and t not in stopped and not guard:
                 is_new = t not in held
                 if is_new and (n_positions >= self.p["max_positions"]
                                or new_today >= self.p["max_new_per_day"]):
@@ -188,9 +194,11 @@ class LLMAnalystStrategy(Strategy):
                     "event_type": "recommendation", "strategy": self.name, "ticker": t,
                     "decision": action, "reasoning": str(idea.get("razon", ""))[:400],
                     "payload": {**idea, "price_at": quote.price, "currency": quote.currency,
-                                "planned": planned is not None},
+                                "as_of": str(quote.as_of), "planned": planned is not None},
                 })
 
+        if guard:
+            ctx.notes.append(f"⛔ {self.label} en pausa (solo ventas): {guard}")
         if not cached:
             tokens = int(usage.get("total_tokens", 0))
             ctx.notes.append(
