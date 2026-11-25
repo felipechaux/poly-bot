@@ -1,74 +1,158 @@
 # ============================================================
-# Polymarket Bot — Default Configuration
-# Override any value via environment variables or .env
+# Invest Bot — configuración por defecto (paper trading)
+# Solo dinero ficticio. No es asesoría financiera.
+# Variables de entorno (.env) sobreescriben modo, logging y ntfy.
 # ============================================================
 
-# --- Market Data Feed ---
-feed:
-  poll_interval_seconds: 10       # Was 5 — reduce polling, fewer low-quality signals
-  market_refresh_seconds: 300
-  max_markets: 25                 # Was 60 — fewer markets, higher quality selection
-  # Only track markets with genuine uncertainty — skip long-shots and near-resolved
-  min_yes_price: 0.10             # Was 0.05 — skip even more long-shots
-  max_yes_price: 0.90             # Was 0.95 — skip near-resolved
+# --- Capital inicial ficticio ---
+portfolio:
+  base_currency: COP            # moneda de reporte principal
+  initial_cash:
+    COP: 10000000.0
+    USD: 5000.0
 
-# --- Risk Management ---
+# --- Ciclo diario ---
+schedule:
+  timezone: America/Bogota
+  daily_run_time: "17:00"       # después del cierre BVC (~15:55) y NYSE (15:00 Bogotá)
+  run_on_start: true            # al arrancar, corre el ciclo si hoy aún no se ha corrido
+  weekdays_only: true
+
+# --- Datos de mercado ---
+market_data:
+  fx_ticker: "COP=X"            # USD→COP (TRM aproximada de Yahoo)
+  history_period: "2y"          # histórico para indicadores de tendencia
+  cache_ttl_minutes: 30
+  max_stale_days: 5             # precio más viejo que esto = no operable
+
+# --- Costos simulados (por mercado) ---
+costs:
+  BVC:    {commission_pct: 0.003, min_commission: 10000.0, slippage_pct: 0.002, fractional: false}
+  US:     {commission_pct: 0.001, min_commission: 1.0,     slippage_pct: 0.0005, fractional: true}
+  CRYPTO: {commission_pct: 0.001, min_commission: 0.0,     slippage_pct: 0.001, fractional: true}
+  fx_spread_pct: 0.005          # spread al convertir COP↔USD
+  dividend_withholding:         # retención aproximada sobre dividendos
+    US: 0.30                    # EE.UU. a no residentes (sin tratado)
+    BVC: 0.0                    # simplificación; revisar con contador
+    CRYPTO: 0.0
+
+# --- Riesgo ---
 risk:
-  max_position_size_usdc: 500.0   # Max single position in USDC
-  max_total_exposure_usdc: 3000.0 # Max total portfolio exposure
-  max_position_count: 10          # Max concurrent open positions
-  min_market_liquidity_usdc: 1000.0  # Min market liquidity to consider
-  min_price: 0.02                 # Reject orders below this price
-  max_price: 0.98                 # Reject orders above this price
-  order_debounce_seconds: 30      # Prevent duplicate signals within window
+  max_weight_per_asset: 0.50    # % del total
+  max_weight_per_class:
+    crypto: 0.10
+    commodity: 0.20
+    equity: 0.30                # acciones individuales (no ETFs)
+  max_weight_per_region:
+    CO: 0.40
+  min_order_value_usd: 25.0     # no generar órdenes diminutas
+  allow_short: false
 
-# --- Paper Trading ---
-paper:
-  initial_balance_usdc: 5000.0
-  fill_mode: "order_book"         # "instant" | "order_book"
-  simulated_latency_ms: 200       # Simulated fill latency
-
-# --- Strategies ---
+# --- Estrategias ---
 strategies:
-
-  mean_reversion:
-    enabled: true
-    market_filters:
-      min_liquidity_usdc: 5000.0
-    params:
-      # Entry: require genuine 24h overreaction signal (sharp price drop/spike)
-      drop_threshold_pct: 15.0    # 15% 24h price change required to enter
-      # Entry range: only buy in "meaningful uncertainty" zone, not extreme ends
-      entry_low: 0.20             # Min YES price to enter (won't buy lottery tickets <20%)
-      entry_high: 0.45            # Max YES price for YES buy (symmetric for NO buy: 0.55-0.80)
-      # Exit: percentage gain from entry price (not absolute threshold)
-      profit_target_pct: 0.15     # Exit when mid >= entry_price × 1.15 (+15%)
-      position_size_usdc: 50.0    # Smaller positions while validating new logic
-      stop_loss_pct: 0.20         # Tighter: exit if down 20% (was 35%)
-      max_hold_days: 7            # Was 14
-
-  ai_research:
+  core_allocation:
     enabled: true
     params:
-      min_edge_pct: 0.18          # 18% edge required (was 8% — far too low vs market noise)
-      min_confidence: "high"      # Was "medium" — only high-conviction AI calls
-      position_size_usdc: 75.0    # Was 100
-      research_interval_min: 30.0 # Was 15 — less churn, more deliberate
-      max_markets_per_cycle: 5    # Was 10 — research fewer, better markets
-      min_research_liquidity: 5000.0  # Was 3000
-      min_volume_usdc: 10000.0    # NEW: only research markets with real trading volume
-      stop_loss_pct: 0.20         # Was 0.30 — tighter
-      max_hold_days: 5            # Was 7
+      rebalance: monthly        # primer ciclo hábil de cada mes
+      drift_band: 0.05          # o si un activo se desvía > 5 pp del objetivo
+      cash_buffer_pct: 0.01     # deja 1% en caja para comisiones
+      targets:                  # pesos sobre el valor total (deben sumar 1.0)
+        VT: 0.45                # global
+        QQQ: 0.15               # global (tech US)
+        ICOLCAP.CL: 0.10        # Colombia (ETF COLCAP, en COP)
+        CIB: 0.05               # Colombia (Grupo Cibest ADR)
+        ECOPETROL.CL: 0.05      # Colombia (en COP)
+        BND: 0.10               # bonos
+        GLD: 0.07               # oro
+        BTC-USD: 0.03           # cripto
 
-  momentum:
-    enabled: false
-    market_filters:
-      min_liquidity_usdc: 5000.0
-    params:
-      # Minimum 1-hour price change % to enter
-      min_change_pct: 5.0
-      # Exit when momentum reverses by this %
-      reversal_pct: 2.0
-      position_size_usdc: 100.0
-      # How many consecutive updates must confirm direction
-      confirmation_periods: 3
+# --- Universo seguido ---
+# market: BVC | US | CRYPTO  ·  currency se infiere del market (BVC→COP, resto→USD)
+# asset_class: etf | equity | bond | commodity | crypto  ·  region: CO | US | LATAM | GLOBAL | INTL | EM
+# benchmark: true → se usa para comparar desempeño
+# Tickers verificados en yfinance el 2026-11-24. Excluidos por baja liquidez/datos:
+# NUTRESA.CL, GRUPOAVAL.CL, CNEC.CL, PFDAVVNDA.CL, BOGOTA.CL, ^COLCAP (sin datos), GXG (ahora COLO).
+universe:
+  # Colombia — BVC (COP)
+  - {ticker: ICOLCAP.CL,    name: "iShares COLCAP",         market: BVC, asset_class: etf,    region: CO, benchmark: true}
+  - {ticker: HCOLSEL.CL,    name: "Hcolsel (Colombia Select)", market: BVC, asset_class: etf, region: CO}
+  - {ticker: ECOPETROL.CL,  name: "Ecopetrol",              market: BVC, asset_class: equity, region: CO}
+  - {ticker: CIBEST.CL,     name: "Grupo Cibest (ord.)",    market: BVC, asset_class: equity, region: CO}
+  - {ticker: PFCIBEST.CL,   name: "Grupo Cibest (pref.)",   market: BVC, asset_class: equity, region: CO}
+  - {ticker: ISA.CL,        name: "ISA",                    market: BVC, asset_class: equity, region: CO}
+  - {ticker: GEB.CL,        name: "Grupo Energía Bogotá",   market: BVC, asset_class: equity, region: CO}
+  - {ticker: PFAVAL.CL,     name: "Grupo Aval (pref.)",     market: BVC, asset_class: equity, region: CO}
+  - {ticker: CEMARGOS.CL,   name: "Cementos Argos",         market: BVC, asset_class: equity, region: CO}
+  - {ticker: GRUPOARGOS.CL, name: "Grupo Argos",            market: BVC, asset_class: equity, region: CO}
+  - {ticker: CELSIA.CL,     name: "Celsia",                 market: BVC, asset_class: equity, region: CO}
+  - {ticker: PFGRUPSURA.CL, name: "Grupo Sura (pref.)",     market: BVC, asset_class: equity, region: CO}
+  - {ticker: GRUPOSURA.CL,  name: "Grupo Sura (ord.)",      market: BVC, asset_class: equity, region: CO}
+  - {ticker: MINEROS.CL,    name: "Mineros",                market: BVC, asset_class: equity, region: CO}
+  - {ticker: TERPEL.CL,     name: "Terpel",                 market: BVC, asset_class: equity, region: CO}
+  - {ticker: PROMIGAS.CL,   name: "Promigas",               market: BVC, asset_class: equity, region: CO}
+  # Colombia — NYSE (USD)
+  - {ticker: CIB,   name: "Grupo Cibest ADR",  market: US, asset_class: equity, region: CO}
+  - {ticker: EC,    name: "Ecopetrol ADR",     market: US, asset_class: equity, region: CO}
+  - {ticker: AVAL,  name: "Grupo Aval ADR",    market: US, asset_class: equity, region: CO}
+  - {ticker: COLO,  name: "Global X MSCI Colombia", market: US, asset_class: etf, region: CO}
+  # LatAm
+  - {ticker: NU,    name: "Nu Holdings (Nubank)", market: US, asset_class: equity, region: LATAM}
+  - {ticker: MELI,  name: "MercadoLibre",      market: US, asset_class: equity, region: LATAM}
+  - {ticker: GLOB,  name: "Globant",           market: US, asset_class: equity, region: LATAM}
+  - {ticker: DLO,   name: "dLocal",            market: US, asset_class: equity, region: LATAM}
+  - {ticker: STNE,  name: "StoneCo",           market: US, asset_class: equity, region: LATAM}
+  - {ticker: PAGS,  name: "PagSeguro",         market: US, asset_class: equity, region: LATAM}
+  - {ticker: ITUB,  name: "Itaú Unibanco",     market: US, asset_class: equity, region: LATAM}
+  - {ticker: PBR,   name: "Petrobras",         market: US, asset_class: equity, region: LATAM}
+  - {ticker: VALE,  name: "Vale",              market: US, asset_class: equity, region: LATAM}
+  - {ticker: EWZ,   name: "iShares MSCI Brazil", market: US, asset_class: etf, region: LATAM}
+  - {ticker: ILF,   name: "iShares Latin America 40", market: US, asset_class: etf, region: LATAM}
+  # ETFs índice global / regiones
+  - {ticker: VT,    name: "Vanguard Total World", market: US, asset_class: etf, region: GLOBAL, benchmark: true}
+  - {ticker: ACWI,  name: "iShares MSCI ACWI",    market: US, asset_class: etf, region: GLOBAL}
+  - {ticker: SPY,   name: "S&P 500",              market: US, asset_class: etf, region: US}
+  - {ticker: QQQ,   name: "Nasdaq 100",           market: US, asset_class: etf, region: US}
+  - {ticker: IWM,   name: "Russell 2000",         market: US, asset_class: etf, region: US}
+  - {ticker: SCHD,  name: "Schwab US Dividend",   market: US, asset_class: etf, region: US}
+  - {ticker: VNQ,   name: "Vanguard Real Estate", market: US, asset_class: etf, region: US}
+  - {ticker: VEA,   name: "Developed ex-US",      market: US, asset_class: etf, region: INTL}
+  - {ticker: VWO,   name: "Emerging Markets (Vanguard)", market: US, asset_class: etf, region: EM}
+  - {ticker: EEM,   name: "Emerging Markets (iShares)",  market: US, asset_class: etf, region: EM}
+  # Acciones grandes US / global
+  - {ticker: AAPL,  name: "Apple",       market: US, asset_class: equity, region: US}
+  - {ticker: MSFT,  name: "Microsoft",   market: US, asset_class: equity, region: US}
+  - {ticker: NVDA,  name: "NVIDIA",      market: US, asset_class: equity, region: US}
+  - {ticker: AMZN,  name: "Amazon",      market: US, asset_class: equity, region: US}
+  - {ticker: GOOGL, name: "Alphabet",    market: US, asset_class: equity, region: US}
+  - {ticker: META,  name: "Meta",        market: US, asset_class: equity, region: US}
+  - {ticker: TSLA,  name: "Tesla",       market: US, asset_class: equity, region: US}
+  - {ticker: BRK-B, name: "Berkshire Hathaway", market: US, asset_class: equity, region: US}
+  - {ticker: JPM,   name: "JPMorgan",    market: US, asset_class: equity, region: US}
+  - {ticker: V,     name: "Visa",        market: US, asset_class: equity, region: US}
+  - {ticker: MA,    name: "Mastercard",  market: US, asset_class: equity, region: US}
+  - {ticker: AVGO,  name: "Broadcom",    market: US, asset_class: equity, region: US}
+  - {ticker: AMD,   name: "AMD",         market: US, asset_class: equity, region: US}
+  - {ticker: LLY,   name: "Eli Lilly",   market: US, asset_class: equity, region: US}
+  - {ticker: UNH,   name: "UnitedHealth", market: US, asset_class: equity, region: US}
+  - {ticker: XOM,   name: "ExxonMobil",  market: US, asset_class: equity, region: US}
+  - {ticker: KO,    name: "Coca-Cola",   market: US, asset_class: equity, region: US}
+  - {ticker: PG,    name: "Procter & Gamble", market: US, asset_class: equity, region: US}
+  - {ticker: COST,  name: "Costco",      market: US, asset_class: equity, region: US}
+  - {ticker: WMT,   name: "Walmart",     market: US, asset_class: equity, region: US}
+  - {ticker: NFLX,  name: "Netflix",     market: US, asset_class: equity, region: US}
+  - {ticker: TSM,   name: "TSMC",        market: US, asset_class: equity, region: INTL}
+  - {ticker: ASML,  name: "ASML",        market: US, asset_class: equity, region: INTL}
+  - {ticker: BABA,  name: "Alibaba",     market: US, asset_class: equity, region: EM}
+  # Bonos
+  - {ticker: BND,   name: "Vanguard Total Bond", market: US, asset_class: bond, region: US}
+  - {ticker: TLT,   name: "Treasury 20+ años",   market: US, asset_class: bond, region: US}
+  - {ticker: IEF,   name: "Treasury 7-10 años",  market: US, asset_class: bond, region: US}
+  - {ticker: SHY,   name: "Treasury 1-3 años",   market: US, asset_class: bond, region: US}
+  # Materias primas
+  - {ticker: GLD,   name: "Oro",    market: US, asset_class: commodity, region: GLOBAL}
+  - {ticker: SLV,   name: "Plata",  market: US, asset_class: commodity, region: GLOBAL}
+  - {ticker: USO,   name: "Petróleo WTI", market: US, asset_class: commodity, region: GLOBAL}
+  # Cripto (24/7)
+  - {ticker: BTC-USD, name: "Bitcoin",  market: CRYPTO, asset_class: crypto, region: GLOBAL}
+  - {ticker: ETH-USD, name: "Ethereum", market: CRYPTO, asset_class: crypto, region: GLOBAL}
+  - {ticker: SOL-USD, name: "Solana",   market: CRYPTO, asset_class: crypto, region: GLOBAL}

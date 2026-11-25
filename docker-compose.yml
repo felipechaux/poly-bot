@@ -1,36 +1,36 @@
-version: "3.9"
-
 services:
-  poly-bot:
+  invest-bot:
     build: .
-    image: poly-bot:latest
-    container_name: poly-bot
+    image: invest-bot:latest
+    container_name: invest-bot
     restart: unless-stopped
-
-    # Mount .env for secrets (never bake secrets into the image)
     env_file:
-      - .env
-
+      - path: .env
+        required: false
+    environment:
+      TZ: America/Bogota
+    ports:
+      - "127.0.0.1:8080:8080"       # solo local; el iPhone entra por el túnel
     volumes:
-      # Persist SQLite database across restarts
-      - ./data:/app/data
-
-    # Resource limits — trading bots don't need much
+      - ./data:/app/data            # SQLite (data/invest_bot.db)
+      - ./config:/app/config:ro     # edit config/default.yaml without rebuilding
     deploy:
       resources:
         limits:
-          memory: 512m
-          cpus: "0.5"
-
+          memory: 768m
+          cpus: "1.0"
     logging:
-      driver: "json-file"
+      driver: json-file
       options:
-        max-size: "50m"
+        max-size: "20m"
         max-file: "3"
 
-    healthcheck:
-      test: ["CMD", "python", "-c", "import poly_bot; print('ok')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
+  # Túnel rápido de Cloudflare (sin cuenta): expone el dashboard por HTTPS en una URL
+  # aleatoria *.trycloudflare.com que cambia en cada reinicio. Ver: make tunnel-url
+  tunnel:
+    image: cloudflare/cloudflared:2026.3.0
+    container_name: invest-bot-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://invest-bot:8080
+    depends_on:
+      - invest-bot

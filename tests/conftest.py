@@ -1,46 +1,62 @@
-"""Shared test fixtures."""
+"""Shared test fixtures: a small universe, quotes and a fake price provider."""
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
+import pandas as pd
 import pytest
-from datetime import datetime
 
-from poly_bot.market_data.models import Market, OrderBookSummary, PriceLevel, Token
-from poly_bot.portfolio.models import PortfolioSnapshot, Position
+from poly_bot.market_data.models import Asset, Dividend, Indicators, Quote
+from poly_bot.market_data.provider import MarketData
+from poly_bot.market_data.universe import Universe
 
+TODAY = date(2026, 11, 24)
+USDCOP = 4000.0
 
-@pytest.fixture
-def sample_order_book() -> OrderBookSummary:
-    return OrderBookSummary(
-        market="0xabc123",
-        asset_id="0xtoken_yes",
-        bids=[
-            PriceLevel(price=0.54, size=100.0),
-            PriceLevel(price=0.53, size=200.0),
-            PriceLevel(price=0.52, size=300.0),
-        ],
-        asks=[
-            PriceLevel(price=0.56, size=100.0),
-            PriceLevel(price=0.57, size=200.0),
-            PriceLevel(price=0.58, size=300.0),
-        ],
-    )
+ASSETS = [
+    Asset(ticker="VT", name="World", market="US", asset_class="etf", region="GLOBAL", benchmark=True),
+    Asset(ticker="ICOLCAP.CL", name="COLCAP", market="BVC", asset_class="etf", region="CO", benchmark=True),
+    Asset(ticker="ECOPETROL.CL", name="Ecopetrol", market="BVC", asset_class="equity", region="CO"),
+    Asset(ticker="BTC-USD", name="Bitcoin", market="CRYPTO", asset_class="crypto", region="GLOBAL"),
+    Asset(ticker="NU", name="Nubank", market="US", asset_class="equity", region="LATAM"),
+]
+PRICES = {"VT": 100.0, "ICOLCAP.CL": 20_000.0, "ECOPETROL.CL": 2_000.0, "BTC-USD": 50_000.0, "NU": 10.0}
 
 
-@pytest.fixture
-def sample_market() -> Market:
-    return Market(
-        condition_id="0xabc123",
-        question="Will BTC close above $100k on April 1, 2026?",
-        liquidity=50000.0,
-        volume=100000.0,
-        tokens=[
-            Token(token_id="0xtoken_yes", outcome="Yes", price=0.55),
-            Token(token_id="0xtoken_no", outcome="No", price=0.45),
-        ],
-    )
+def make_quotes(prices: dict[str, float] | None = None, as_of: date = TODAY) -> dict[str, Quote]:
+    prices = prices or PRICES
+    ccy = {a.ticker: a.currency for a in ASSETS}
+    return {
+        t: Quote(ticker=t, price=p, currency=ccy[t], as_of=as_of,
+                 indicators=Indicators(ret_1d=0.01, ret_3m=0.05, sma50=p, sma200=p * 0.9))
+        for t, p in prices.items()
+    }
 
 
 @pytest.fixture
-def empty_portfolio() -> PortfolioSnapshot:
-    return PortfolioSnapshot(cash_usdc=10_000.0)
+def universe() -> Universe:
+    return Universe(ASSETS)
+
+
+@pytest.fixture
+def quotes() -> dict[str, Quote]:
+    return make_quotes()
+
+
+class FakeProvider:
+    def __init__(self, prices: dict[str, float] | None = None, usdcop: float = USDCOP,
+                 dividends: dict[str, list[Dividend]] | None = None, as_of: date = TODAY) -> None:
+        self.prices = dict(prices or PRICES)
+        self.usdcop = usdcop
+        self.dividends = dividends or {}
+        self.as_of = as_of
+
+    async def fetch(self, assets: list[Asset]) -> MarketData:
+        quotes = make_quotes(self.prices, self.as_of)
+        idx = pd.date_range(self.as_of - timedelta(days=2), periods=3)
+        return MarketData(
+            quotes={t: q for t, q in quotes.items() if t in {a.ticker for a in assets}},
+            dividends=self.dividends, usdcop=self.usdcop, usdcop_as_of=self.as_of,
+            closes={t: pd.Series([p] * 3, index=idx) for t, p in self.prices.items()},
+        )

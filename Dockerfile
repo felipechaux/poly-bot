@@ -1,46 +1,30 @@
 # ---- Build stage ----
 FROM python:3.12-slim AS builder
-
 WORKDIR /app
-
-# Install uv
 RUN pip install --no-cache-dir uv
-
 COPY pyproject.toml uv.lock ./
 COPY poly_bot/ ./poly_bot/
-
-# Install dependencies into a virtual env
 RUN uv sync --no-dev --frozen
 
 # ---- Runtime stage ----
 FROM python:3.12-slim AS runtime
-
 WORKDIR /app
-
-# Non-root user for security
 RUN useradd -m -u 1000 botuser
-
-# Copy venv and app from builder
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/poly_bot /app/poly_bot
 COPY config/ ./config/
-
-# Data directory for SQLite
-RUN mkdir -p /app/data && chown -R botuser:botuser /app
-
+RUN mkdir -p /app/data /home/botuser/.cache/py-yfinance && chown -R botuser:botuser /app /home/botuser/.cache
 USER botuser
 
-# Activate venv
-ENV PATH="/app/.venv/bin:$PATH"
-ENV PYTHONUNBUFFERED=1
-ENV LOG_FORMAT=json
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    LOG_FORMAT=json \
+    TZ=America/Bogota \
+    POLY_MODE=paper
 
-# Default: paper trading mode
-ENV POLY_MODE=paper
-ENV ENABLE_LIVE_TRADING=false
-
-# /app/data is mounted as a Railway Volume for SQLite persistence
-# See: https://docs.railway.com/reference/volumes
+EXPOSE 8080
+HEALTHCHECK --interval=60s --timeout=5s --start-period=60s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=4)"
 
 ENTRYPOINT ["poly-bot"]
-CMD ["run"]
+CMD ["run", "--port", "8080"]

@@ -1,4 +1,4 @@
-.PHONY: help setup run stop status logs markets trades test lint install-service uninstall-service
+.PHONY: help setup run open cycle dry-run prices positions trades notify-test test lint install-service uninstall-service docker-build docker-run docker-stop docker-logs docker-status tunnel-url
 
 SHELL := /bin/bash
 UV := uv
@@ -19,23 +19,29 @@ setup:  ## Install dependencies and create .env
 
 # ─── Local run ──────────────────────────────────────────────────────────────
 
-run:  ## Start bot + web dashboard on http://localhost:8080
+run:  ## Start scheduler + dashboard on http://localhost:8080
 	$(UV) run poly-bot run --port 8080
-
-run-live:  ## Start bot in LIVE mode (requires ENABLE_LIVE_TRADING=true in .env)
-	$(UV) run poly-bot run --mode live --port 8080
 
 open:  ## Open dashboard in browser
 	open http://localhost:8080
 
-markets:  ## List available Polymarket markets
-	$(UV) run poly-bot markets --min-liquidity 5000
+cycle:  ## Run today's cycle now (executes + notifies)
+	$(UV) run poly-bot cycle
 
-trades:  ## Show recent trade history
+dry-run:  ## Simulate today's cycle without executing anything
+	$(UV) run poly-bot cycle --dry-run
+
+prices:  ## Universe quotes + trend — usage: make prices REGION=CO
+	$(UV) run poly-bot prices $(if $(REGION),--region $(REGION),)
+
+positions:  ## Show paper portfolio
+	$(UV) run poly-bot positions
+
+trades:  ## Show recent transactions
 	$(UV) run poly-bot trades
 
-orderbook:  ## Show order book — usage: make orderbook TOKEN=<token_id>
-	$(UV) run poly-bot orderbook $(TOKEN)
+notify-test:  ## Send a test ntfy notification
+	$(UV) run poly-bot notify-test
 
 # ─── macOS background service (launchd) ─────────────────────────────────────
 
@@ -64,10 +70,10 @@ logs-errors:  ## Tail error logs from background service
 # ─── Docker ─────────────────────────────────────────────────────────────────
 
 docker-build:  ## Build Docker image
-	docker build -t poly-bot:latest .
+	docker compose build
 
 docker-run:  ## Run bot in Docker (paper mode)
-	docker compose up -d
+	docker compose up -d --build
 	@echo "✓ Bot running in Docker. Logs: make docker-logs"
 
 docker-stop:  ## Stop Docker container
@@ -79,16 +85,19 @@ docker-logs:  ## Tail Docker logs
 docker-status:  ## Show Docker container status
 	docker compose ps
 
+tunnel-url:  ## Print the public dashboard URL (Cloudflare quick tunnel)
+	@docker compose logs tunnel 2>/dev/null | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | tail -1
+
 # ─── Development ────────────────────────────────────────────────────────────
 
 test:  ## Run all tests
-	$(UV) run pytest tests/ -v
+	$(UV) run python -m pytest tests/ -v
 
 test-unit:  ## Run unit tests only
-	$(UV) run pytest tests/unit/ -v
+	$(UV) run python -m pytest tests/unit/ -v
 
 lint:  ## Run ruff linter
-	$(UV) run ruff check poly_bot/ tests/
+	$(UV) run python -m ruff check poly_bot/ tests/
 
 format:  ## Auto-format with ruff
-	$(UV) run ruff format poly_bot/ tests/
+	$(UV) run python -m ruff format poly_bot/ tests/

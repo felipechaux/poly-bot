@@ -1,49 +1,28 @@
 """
-Settings — single source of truth for all runtime configuration.
-Merges .env secrets with config/default.yaml defaults.
+Settings — single source of truth for runtime configuration.
+Secrets / per-machine values come from env (.env); everything else from config/default.yaml.
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "default.yaml"
 
-# ---------------------------------------------------------------------------
-# Sub-config models
-# ---------------------------------------------------------------------------
-
-
-class FeedConfig:
-    poll_interval_seconds: float = 2.0
-    market_refresh_seconds: float = 60.0
-    max_markets: int = 50
-
-
-class RiskConfig:
-    max_position_size_usdc: float = 500.0
-    max_total_exposure_usdc: float = 3000.0
-    max_position_count: int = 10
-    min_market_liquidity_usdc: float = 1000.0
-    min_price: float = 0.02
-    max_price: float = 0.98
-    order_debounce_seconds: float = 30.0
-
-
-class PaperConfig:
-    initial_balance_usdc: float = 10_000.0
-    fill_mode: str = "order_book"
-    simulated_latency_ms: int = 200
-
-
-# ---------------------------------------------------------------------------
-# Main settings class
-# ---------------------------------------------------------------------------
+YAML_SECTIONS = (
+    "portfolio",
+    "schedule",
+    "market_data",
+    "costs",
+    "risk",
+    "strategies",
+    "universe",
+)
 
 
 class Settings(BaseSettings):
@@ -55,64 +34,53 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Trading mode
-    mode: Literal["paper", "live"] = Field(default="paper", alias="POLY_MODE")
-    enable_live_trading: bool = Field(default=False)
+    # Only paper mode exists in Phase 1. advisor/live come later (see docs/INVEST_BOT_PLAN.md).
+    mode: Literal["paper"] = Field(default="paper", alias="POLY_MODE")
 
-    # Wallet (required for live mode)
-    private_key: SecretStr | None = Field(default=None)
-    chain_id: int = Field(default=137)
+    db_path: str = Field(default="data/invest_bot.db")
+    config_path: str = Field(default=str(DEFAULT_CONFIG_PATH))
 
-    # API endpoints
-    clob_host: str = Field(default="https://clob.polymarket.com")
-    gamma_host: str = Field(default="https://gamma-api.polymarket.com")
+    # Notifications (ntfy.sh). Empty topic = notifications disabled.
+    ntfy_server: str = Field(default="https://ntfy.sh", validation_alias="NTFY_SERVER")
+    ntfy_topic: str = Field(default="", validation_alias="NTFY_TOPIC")
+    ntfy_token: str = Field(default="", validation_alias="NTFY_TOKEN")
 
-    # Paper trading
-    paper_initial_balance: float = Field(default=10_000.0)
+    dashboard_url: str = Field(default="", validation_alias="DASHBOARD_URL")
 
-    # Logging
-    log_format: Literal["console", "json"] = Field(
-        default="console", validation_alias="LOG_FORMAT"
-    )
+    log_format: Literal["console", "json"] = Field(default="console", validation_alias="LOG_FORMAT")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
 
-    # Loaded from YAML (not env)
-    feed: dict[str, Any] = Field(default_factory=dict)
+    # Loaded from YAML
+    portfolio: dict[str, Any] = Field(default_factory=dict)
+    schedule: dict[str, Any] = Field(default_factory=dict)
+    market_data: dict[str, Any] = Field(default_factory=dict)
+    costs: dict[str, Any] = Field(default_factory=dict)
     risk: dict[str, Any] = Field(default_factory=dict)
-    paper: dict[str, Any] = Field(default_factory=dict)
     strategies: dict[str, Any] = Field(default_factory=dict)
+    universe: list[dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _load_yaml_defaults(self) -> "Settings":
-        """Merge YAML config file under env vars."""
-        yaml_path = Path(__file__).parent.parent.parent / "config" / "default.yaml"
-        if yaml_path.exists():
-            with open(yaml_path) as f:
-                data: dict[str, Any] = yaml.safe_load(f) or {}
-            for key in ("feed", "risk", "paper", "strategies"):
+    def _load_yaml(self) -> "Settings":
+        path = Path(self.config_path)
+        if path.exists():
+            data: dict[str, Any] = yaml.safe_load(path.read_text()) or {}
+            for key in YAML_SECTIONS:
                 if not getattr(self, key) and key in data:
                     object.__setattr__(self, key, data[key])
         return self
 
-    @model_validator(mode="after")
-    def _validate_live_mode(self) -> "Settings":
-        if self.mode == "live":
-            if not self.enable_live_trading:
-                raise ValueError(
-                    "Set ENABLE_LIVE_TRADING=true to enable live trading. "
-                    "Use POLY_MODE=paper for safe paper trading."
-                )
-            if not self.private_key:
-                raise ValueError(
-                    "POLY_PRIVATE_KEY is required for live trading mode."
-                )
-        return self
+    @property
+    def base_currency(self) -> str:
+        return str(self.portfolio.get("base_currency", "COP"))
 
-    def get_risk(self, key: str, default: Any = None) -> Any:
-        return self.risk.get(key, default)
+    @property
+    def initial_cash(self) -> dict[str, float]:
+        raw = self.portfolio.get("initial_cash", {"COP": 10_000_000.0, "USD": 5_000.0})
+        return {str(k): float(v) for k, v in raw.items()}
 
     def get_strategy_config(self, name: str) -> dict[str, Any]:
-        return self.strategies.get(name, {})
+        cfg: dict[str, Any] = self.strategies.get(name, {})
+        return cfg
 
     def active_strategies(self) -> list[str]:
         return [
@@ -122,7 +90,6 @@ class Settings(BaseSettings):
         ]
 
 
-# Singleton — import this everywhere
 _settings: Settings | None = None
 
 
