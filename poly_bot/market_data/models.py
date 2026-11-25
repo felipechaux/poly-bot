@@ -1,112 +1,66 @@
-"""
-Pydantic models for all Polymarket API responses.
-These are the canonical data types used throughout the bot.
-"""
+"""Market data models: assets in the universe, quotes and trend indicators."""
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any
+from datetime import date
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
+Market = Literal["BVC", "US", "CRYPTO"]
+Currency = Literal["COP", "USD"]
 
-class PriceLevel(BaseModel):
-    """A single price level in the order book."""
-
-    price: float
-    size: float
+MARKET_CURRENCY: dict[str, Currency] = {"BVC": "COP", "US": "USD", "CRYPTO": "USD"}
 
 
-class OrderBookSummary(BaseModel):
-    """Snapshot of a market's order book."""
-
-    market: str  # condition_id
-    asset_id: str  # token_id (YES or NO)
-    bids: list[PriceLevel] = Field(default_factory=list)
-    asks: list[PriceLevel] = Field(default_factory=list)
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+class Asset(BaseModel):
+    ticker: str
+    name: str = ""
+    market: Market = "US"
+    asset_class: str = "equity"  # etf | equity | bond | commodity | crypto
+    region: str = "US"
+    benchmark: bool = False
 
     @property
-    def best_bid(self) -> float | None:
-        if not self.bids:
-            return None
-        return max(b.price for b in self.bids)
+    def currency(self) -> Currency:
+        return MARKET_CURRENCY[self.market]
+
+
+class Indicators(BaseModel):
+    """Trend/volatility indicators computed from daily closes."""
+
+    ret_1d: float | None = None
+    ret_1m: float | None = None
+    ret_3m: float | None = None
+    ret_1y: float | None = None
+    sma50: float | None = None
+    sma200: float | None = None
+    vol_annual: float | None = None
+
+
+class Quote(BaseModel):
+    ticker: str
+    price: float  # last daily close, in the asset's currency
+    currency: Currency
+    as_of: date
+    indicators: Indicators = Indicators()
 
     @property
-    def best_ask(self) -> float | None:
-        if not self.asks:
-            return None
-        return min(a.price for a in self.asks)
-
-    @property
-    def mid_price(self) -> float | None:
-        bb, ba = self.best_bid, self.best_ask
-        if bb is None or ba is None:
-            return None
-        return (bb + ba) / 2
-
-    @property
-    def spread(self) -> float | None:
-        bb, ba = self.best_bid, self.best_ask
-        if bb is None or ba is None:
-            return None
-        return ba - bb
+    def trend(self) -> Literal["alcista", "bajista", "mixta", "sin datos"]:
+        i = self.indicators
+        if i.sma50 is None or i.sma200 is None:
+            return "sin datos"
+        above = self.price > i.sma200
+        golden = i.sma50 > i.sma200
+        if above and golden:
+            return "alcista"
+        if not above and not golden:
+            return "bajista"
+        return "mixta"
 
 
-class Token(BaseModel):
-    """A YES or NO token within a market."""
-
-    token_id: str
-    outcome: str  # "Yes" or "No"
-    price: float = 0.0
-
-
-class Market(BaseModel):
-    """Full market metadata from the Gamma API."""
-
-    condition_id: str
-    question_id: str = ""
-    question: str
-    description: str = ""
-    market_slug: str = ""
-    category: str = ""
-    active: bool = True
-    closed: bool = False
-    accepting_orders: bool = True
-    volume: float = 0.0
-    liquidity: float = 0.0
-    best_bid: float = 0.0
-    best_ask: float = 0.0
-    last_trade_price: float = 0.0
-    outcome_prices: list[float] = Field(default_factory=list)
-    tokens: list[Token] = Field(default_factory=list)
-    end_date_iso: str | None = None
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-
-    # Extra Gamma API fields
-    one_hour_price_change: float = 0.0
-    one_day_price_change: float = 0.0
-
-    @property
-    def yes_token(self) -> Token | None:
-        for t in self.tokens:
-            if t.outcome.lower() == "yes":
-                return t
-        return None
-
-    @property
-    def no_token(self) -> Token | None:
-        for t in self.tokens:
-            if t.outcome.lower() == "no":
-                return t
-        return None
-
-
-class MarketUpdate(BaseModel):
-    """Published by the feed to all consumers."""
-
-    market: Market
-    order_book: OrderBookSummary
-    received_at: datetime = Field(default_factory=datetime.utcnow)
+class Dividend(BaseModel):
+    ticker: str
+    ex_date: date
+    amount_per_share: float
+    currency: Currency

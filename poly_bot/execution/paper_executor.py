@@ -1,319 +1,201 @@
 """
-Paper trading executor — simulates fills against real live order books.
+Paper executor — simulates fills at the last daily close.
 
-Fill simulation levels:
-  "instant"     — fill immediately at requested price (unrealistic, fast testing)
-  "order_book"  — walk the live book to determine realistic fill price + slippage
+Fill price  = close × (1 ± slippage)   (worse for us on both sides)
+Commission  = max(min_commission, commission_pct × gross), per market (BVC / US / CRYPTO)
+Quantity    = whole shares on BVC, fractional on US/crypto (configurable)
+FX          = USD↔COP at the market rate with a spread
 
-Resting paper orders are checked on every call to on_market_update().
+The executor is stateless: callers pass the cash/holding available; the PositionTracker
+applies the resulting Transaction.
 """
 
 from __future__ import annotations
 
-import asyncio
-import uuid
-from datetime import datetime
-from typing import Any, Callable, Literal
+import math
+from dataclasses import dataclass
+from typing import Any
 
-from poly_bot.execution.models import (
-    ExecutionReport,
-    Fill,
-    OrderRequest,
-    OrderSide,
-    OrderStatus,
-)
-from poly_bot.market_data.models import OrderBookSummary, PriceLevel
+from poly_bot.execution.models import ExecutionReport, OrderRequest, Transaction
+from poly_bot.market_data.models import Asset, Currency, Quote
 from poly_bot.observability.logging import get_logger
 
 log = get_logger(__name__)
 
-# Typical Polymarket taker/maker fees
-TAKER_FEE = 0.0  # Polymarket currently 0% protocol fee (builder program)
-MAKER_FEE = 0.0
+
+@dataclass(frozen=True)
+class MarketCosts:
+    commission_pct: float = 0.001
+    min_commission: float = 0.0
+    slippage_pct: float = 0.0005
+    fractional: bool = True
+
+    def commission(self, gross: float) -> float:
+        return max(self.min_commission, gross * self.commission_pct)
 
 
-class RestingOrder:
-    """A paper limit order waiting to be matched."""
-
-    def __init__(self, request: OrderRequest, order_id: str, remaining_usdc: float) -> None:
-        self.request = request
-        self.order_id = order_id
-        self.remaining_usdc = remaining_usdc
-        self.created_at = datetime.utcnow()
-        self.fills: list[Fill] = []
+DEFAULT_COSTS: dict[str, MarketCosts] = {
+    "BVC": MarketCosts(0.003, 10_000.0, 0.002, False),
+    "US": MarketCosts(0.001, 1.0, 0.0005, True),
+    "CRYPTO": MarketCosts(0.001, 0.0, 0.001, True),
+}
 
 
 class PaperExecutor:
-    """
-    Simulated execution engine for paper trading.
-    Thread-safe via asyncio — all methods must be called from the event loop.
-    """
-
     is_paper: bool = True
 
-    def __init__(
+    def __init__(self, costs: dict[str, Any] | None = None) -> None:
+        costs = dict(costs or {})
+        self.fx_spread_pct = float(costs.pop("fx_spread_pct", 0.005))
+        withholding = costs.pop("dividend_withholding", None) or {}
+        # Dividend withholding tax by market (US→non-resident 30% by default)
+        self.dividend_withholding: dict[str, float] = {
+            "US": 0.30, "BVC": 0.0, "CRYPTO": 0.0, **withholding
+        }
+        self._costs = dict(DEFAULT_COSTS)
+        for market, cfg in costs.items():
+            if isinstance(cfg, dict):
+                self._costs[market] = MarketCosts(**cfg)
+
+    def costs_for(self, asset: Asset) -> MarketCosts:
+        return self._costs[asset.market]
+
+    # ------------------------------------------------------------------
+    # Orders
+    # ------------------------------------------------------------------
+
+    def fill_price(self, asset: Asset, quote: Quote, side: str) -> float:
+        slip = self.costs_for(asset).slippage_pct
+        return quote.price * (1 + slip) if side == "BUY" else quote.price * (1 - slip)
+
+    def max_buy_quantity(self, asset: Asset, quote: Quote, cash: float) -> float:
+        """Largest quantity whose gross + commission fits in `cash`."""
+        c = self.costs_for(asset)
+        price = self.fill_price(asset, quote, "BUY")
+        qty = max(0.0, min(cash / (price * (1 + c.commission_pct)), (cash - c.min_commission) / price))
+        return self._round_qty(qty, c)
+
+    def execute(
         self,
-        initial_balance_usdc: float = 10_000.0,
-        fill_mode: Literal["instant", "order_book"] = "order_book",
-        simulated_latency_ms: int = 200,
-    ) -> None:
-        self.balance_usdc = initial_balance_usdc
-        self._fill_mode = fill_mode
-        self._latency_ms = simulated_latency_ms
-        self._resting: dict[str, RestingOrder] = {}  # order_id -> RestingOrder
-        self._fill_callbacks: list[Callable[[Fill], Any]] = []
-        self._lock = asyncio.Lock()
-
-    # ------------------------------------------------------------------
-    # Public API (implements ExecutionEngine protocol)
-    # ------------------------------------------------------------------
-
-    async def submit_order(self, request: OrderRequest) -> ExecutionReport:
-        """Simulate order submission. Walks order book to determine fills."""
-        async with self._lock:
-            order_id = str(uuid.uuid4())
-            log.info(
-                "paper.order_submitted",
-                order_id=order_id,
-                token_id=request.token_id,
-                side=request.side,
-                price=request.price,
-                size_usdc=request.size_usdc,
-                strategy=request.strategy,
-            )
-
-            if self._fill_mode == "instant":
-                return await self._instant_fill(request, order_id)
-            else:
-                return await self._book_fill(request, order_id, book=None)
-
-    async def submit_order_with_book(
-        self, request: OrderRequest, book: OrderBookSummary
+        request: OrderRequest,
+        asset: Asset,
+        quote: Quote,
+        cash_available: float,
+        held_quantity: float = 0.0,
     ) -> ExecutionReport:
-        """Submit with a pre-fetched order book (used internally by strategy runner)."""
-        async with self._lock:
-            order_id = str(uuid.uuid4())
-            if self._fill_mode == "instant":
-                return await self._instant_fill(request, order_id)
-            else:
-                return await self._book_fill(request, order_id, book=book)
+        def reject(reason: str) -> ExecutionReport:
+            log.info("paper.order_rejected", ticker=request.ticker, side=request.side, reason=reason)
+            return ExecutionReport(request=request, status="rejected", rejection_reason=reason)
 
-    async def cancel_order(self, order_id: str) -> bool:
-        async with self._lock:
-            if order_id in self._resting:
-                del self._resting[order_id]
-                log.info("paper.order_cancelled", order_id=order_id)
-                return True
-            return False
+        if quote.currency != asset.currency:
+            return reject(f"Currency mismatch {quote.currency} != {asset.currency}")
 
-    async def get_open_orders(self) -> list[OrderRequest]:
-        async with self._lock:
-            return [r.request for r in self._resting.values()]
+        c = self.costs_for(asset)
+        price = self.fill_price(asset, quote, request.side)
 
-    def on_fill(self, callback: Callable[[Fill], Any]) -> None:
-        self._fill_callbacks.append(callback)
+        if request.quantity is not None:
+            qty = request.quantity
+        elif request.value is not None:
+            qty = request.value / price
+        else:
+            return reject("Order needs value or quantity")
+        qty = self._round_qty(qty, c)
 
-    # ------------------------------------------------------------------
-    # Market update — check resting orders for matches
-    # ------------------------------------------------------------------
+        if request.side == "SELL":
+            qty = min(qty, held_quantity)
+            # Selling (almost) everything → sell exactly what we hold
+            if held_quantity - qty < 1e-9 or (c.fractional and held_quantity - qty < 1e-6):
+                qty = held_quantity
+        if qty <= 0:
+            return reject("Quantity rounds to zero")
 
-    async def on_market_update(self, book: OrderBookSummary) -> None:
-        """Called by the feed on every new order book snapshot. Matches resting orders."""
-        async with self._lock:
-            matched_ids: list[str] = []
-            for order_id, resting in self._resting.items():
-                if resting.request.token_id != book.asset_id:
-                    continue
-                fill = self._try_match_resting(resting, book)
-                if fill:
-                    resting.fills.append(fill)
-                    self.balance_usdc += (
-                        fill.cost_usdc if resting.request.side == "SELL"
-                        else -fill.cost_usdc
+        gross = qty * price
+        fee = c.commission(gross)
+
+        if request.side == "BUY":
+            if gross + fee > cash_available + 1e-9:
+                # Shrink to what we can afford instead of rejecting outright
+                qty = self.max_buy_quantity(asset, quote, cash_available)
+                if qty <= 0:
+                    return reject(
+                        f"Insufficient {asset.currency} cash: {cash_available:,.2f}"
                     )
-                    await self._emit_fill(fill)
-                    if resting.remaining_usdc <= 0.01:
-                        matched_ids.append(order_id)
-            for oid in matched_ids:
-                del self._resting[oid]
+                gross = qty * price
+                fee = c.commission(gross)
+        elif gross <= fee:
+            return reject("Sale value does not cover commission")
+
+        tx = Transaction(
+            kind=request.side,
+            currency=asset.currency,
+            ticker=asset.ticker,
+            quantity=qty,
+            price=price,
+            gross=gross,
+            fee=fee,
+            strategy=request.strategy,
+            rationale=request.rationale,
+        )
+        log.info(
+            "paper.filled",
+            ticker=asset.ticker,
+            side=request.side,
+            qty=round(qty, 6),
+            price=round(price, 4),
+            gross=round(gross, 2),
+            fee=round(fee, 2),
+            ccy=asset.currency,
+        )
+        return ExecutionReport(request=request, status="filled", transaction=tx)
+
+    @staticmethod
+    def _round_qty(qty: float, c: MarketCosts) -> float:
+        if qty <= 0:
+            return 0.0
+        if c.fractional:
+            return math.floor(qty * 1e6) / 1e6
+        return float(math.floor(qty + 1e-9))
 
     # ------------------------------------------------------------------
-    # Internal fill simulation
+    # FX
     # ------------------------------------------------------------------
 
-    async def _instant_fill(self, request: OrderRequest, order_id: str) -> ExecutionReport:
-        """Fill at requested price immediately, no slippage."""
-        shares = request.size_usdc / request.price
-        fee = request.size_usdc * TAKER_FEE
-
-        if not self._check_balance(request):
-            return ExecutionReport(
-                order_id=order_id,
-                request=request,
-                status="rejected",
-                rejection_reason=f"Insufficient paper balance: {self.balance_usdc:.2f} USDC",
-            )
-
-        fill = Fill(
-            order_id=order_id,
-            token_id=request.token_id,
-            side=request.side,
-            price=request.price,
-            size=shares,
-            cost_usdc=request.size_usdc,
-            fee_usdc=fee,
-            strategy=request.strategy,
-            is_paper=True,
-        )
-
-        self._apply_balance(request, request.size_usdc)
-        await asyncio.sleep(self._latency_ms / 1000)
-        await self._emit_fill(fill)
-
-        return ExecutionReport(
-            order_id=order_id,
-            request=request,
-            status="filled",
-            fills=[fill],
-        )
-
-    async def _book_fill(
+    def convert(
         self,
-        request: OrderRequest,
-        order_id: str,
-        book: OrderBookSummary | None,
-    ) -> ExecutionReport:
-        """Walk order book to simulate realistic fills."""
-        if not self._check_balance(request):
-            return ExecutionReport(
-                order_id=order_id,
-                request=request,
-                status="rejected",
-                rejection_reason=f"Insufficient paper balance: {self.balance_usdc:.2f} USDC",
-            )
-
-        if book is None:
-            # Fall back to instant fill if no book provided
-            return await self._instant_fill(request, order_id)
-
-        fills, remaining = self._walk_book(request, order_id, book)
-
-        for fill in fills:
-            self._apply_balance(request, fill.cost_usdc)
-            await self._emit_fill(fill)
-
-        if remaining > 0.01:
-            # Place remainder as resting limit order
-            resting = RestingOrder(request, order_id, remaining)
-            self._resting[order_id] = resting
-            log.info(
-                "paper.order_resting",
-                order_id=order_id,
-                remaining_usdc=remaining,
-                limit_price=request.price,
-            )
-            status: OrderStatus = "partial" if fills else "open"
+        from_currency: Currency,
+        to_currency: Currency,
+        from_amount: float,
+        usdcop: float,
+        strategy: str = "",
+        rationale: str = "",
+    ) -> Transaction:
+        """Convert `from_amount` of from_currency into to_currency at mid ± spread."""
+        if from_currency == to_currency:
+            raise ValueError("FX conversion needs two different currencies")
+        if from_currency == "COP":
+            rate = usdcop * (1 + self.fx_spread_pct)  # pay more COP per USD
+            received = from_amount / rate
+            mid = from_amount / usdcop
         else:
-            status = "filled"
-
-        return ExecutionReport(
-            order_id=order_id,
-            request=request,
-            status=status,
-            fills=fills,
+            rate = usdcop * (1 - self.fx_spread_pct)  # get fewer COP per USD
+            received = from_amount * rate
+            mid = from_amount * usdcop
+        return Transaction(
+            kind="FX",
+            currency=to_currency,
+            from_currency=from_currency,
+            from_amount=from_amount,
+            gross=received,
+            price=rate,
+            fee=mid - received,  # informational: spread cost in destination currency
+            strategy=strategy,
+            rationale=rationale,
         )
 
-    def _walk_book(
-        self,
-        request: OrderRequest,
-        order_id: str,
-        book: OrderBookSummary,
-    ) -> tuple[list[Fill], float]:
-        """Walk the order book to fill against available liquidity."""
-        if request.side == "BUY":
-            levels = sorted(book.asks, key=lambda x: x.price)
-            price_check = lambda level_price: level_price <= request.price
-        else:
-            levels = sorted(book.bids, key=lambda x: -x.price)
-            price_check = lambda level_price: level_price >= request.price
-
-        remaining = request.size_usdc
-        fills: list[Fill] = []
-
-        for level in levels:
-            if not price_check(level.price) or remaining <= 0.01:
-                break
-
-            level_capacity_usdc = level.price * level.size
-            fill_usdc = min(remaining, level_capacity_usdc)
-            fill_shares = fill_usdc / level.price
-            fee = fill_usdc * TAKER_FEE
-
-            fill = Fill(
-                order_id=order_id,
-                token_id=request.token_id,
-                side=request.side,
-                price=level.price,
-                size=fill_shares,
-                cost_usdc=fill_usdc,
-                fee_usdc=fee,
-                strategy=request.strategy,
-                is_paper=True,
-            )
-            fills.append(fill)
-            remaining -= fill_usdc
-
-        return fills, max(remaining, 0.0)
-
-    def _try_match_resting(
-        self, resting: RestingOrder, book: OrderBookSummary
-    ) -> Fill | None:
-        """Check if a resting order can now be matched against the current book."""
-        request = resting.request
-        if request.side == "BUY":
-            best = book.best_ask
-            if best is None or best > request.price:
-                return None
-            fill_price = best
-        else:
-            best = book.best_bid
-            if best is None or best < request.price:
-                return None
-            fill_price = best
-
-        fill_usdc = resting.remaining_usdc
-        fill_shares = fill_usdc / fill_price
-        fee = fill_usdc * MAKER_FEE
-        resting.remaining_usdc = 0.0
-
-        return Fill(
-            order_id=resting.order_id,
-            token_id=request.token_id,
-            side=request.side,
-            price=fill_price,
-            size=fill_shares,
-            cost_usdc=fill_usdc,
-            fee_usdc=fee,
-            strategy=request.strategy,
-            is_paper=True,
-        )
-
-    def _check_balance(self, request: OrderRequest) -> bool:
-        if request.side == "BUY" and request.size_usdc > self.balance_usdc:
-            return False
-        return True
-
-    def _apply_balance(self, request: OrderRequest, usdc: float) -> None:
-        if request.side == "BUY":
-            self.balance_usdc -= usdc
-        else:
-            self.balance_usdc += usdc
-
-    async def _emit_fill(self, fill: Fill) -> None:
-        for cb in self._fill_callbacks:
-            try:
-                result = cb(fill)
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception as exc:
-                log.error("paper.fill_callback_error", error=str(exc))
+    def from_amount_for(
+        self, from_currency: Currency, to_amount: float, usdcop: float
+    ) -> float:
+        """How much from_currency is needed to receive `to_amount` after spread."""
+        if from_currency == "COP":
+            return to_amount * usdcop * (1 + self.fx_spread_pct)
+        return to_amount / (usdcop * (1 - self.fx_spread_pct))

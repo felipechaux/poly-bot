@@ -1,75 +1,71 @@
-"""Unit tests for the risk manager."""
+"""Risk manager: whitelist, stale prices, weight limits, no shorts, min size."""
 
 from __future__ import annotations
 
-import pytest
-from poly_bot.execution.models import OrderRequest
-from poly_bot.portfolio.models import PortfolioSnapshot
+from datetime import timedelta
+
+from poly_bot.execution.models import OrderRequest, Transaction
+from poly_bot.portfolio.position_tracker import PositionTracker
 from poly_bot.risk.manager import RiskManager
+from tests.conftest import TODAY, USDCOP, make_quotes
 
 
-def make_request(**kwargs):
-    defaults = dict(token_id="tok1", side="BUY", price=0.50, size_usdc=100.0, strategy="test")
-    defaults.update(kwargs)
-    return OrderRequest(**defaults)
+def snap(buys: list[tuple[str, str, float, float]] = ()):  # type: ignore[assignment]
+    t = PositionTracker()
+    t.apply(Transaction(kind="DEPOSIT", currency="USD", gross=10_000.0))
+    for ticker, ccy, qty, price in buys:
+        t.apply(Transaction(kind="BUY", currency=ccy, ticker=ticker, quantity=qty, price=price,
+                            gross=qty * price))
+    t.update_prices(make_quotes(), USDCOP)
+    return t.snapshot()
 
 
-def make_portfolio(**kwargs):
-    defaults = dict(cash_usdc=10_000.0)
-    defaults.update(kwargs)
-    return PortfolioSnapshot(**defaults)
+def rm(universe, **kw) -> RiskManager:
+    return RiskManager(universe, max_weight_per_asset=0.5,
+                       max_weight_per_class={"crypto": 0.10}, max_weight_per_region={"CO": 0.4},
+                       min_order_value_usd=25.0, max_stale_days=5, **kw)
 
 
-def test_approve_normal_order():
-    risk = RiskManager()
-    req = make_request()
-    snap = make_portfolio()
-    approved, reason = risk.check(req, snap)
-    assert approved is True
-    assert reason == ""
+def test_rejects_ticker_outside_universe(universe, quotes):
+    ok, reason = rm(universe).check(OrderRequest(ticker="GME", side="BUY", value=100), None, snap(), TODAY)
+    assert not ok and "universo" in reason
 
 
-def test_reject_price_too_low():
-    risk = RiskManager(min_price=0.02)
-    req = make_request(price=0.01)
-    approved, reason = risk.check(req, make_portfolio())
-    assert not approved
-    assert "minimum" in reason
+def test_rejects_stale_price(universe):
+    q = make_quotes(as_of=TODAY - timedelta(days=10))["VT"]
+    ok, reason = rm(universe).check(OrderRequest(ticker="VT", side="BUY", value=100), q, snap(), TODAY)
+    assert not ok and "desactualizado" in reason
 
 
-def test_reject_price_too_high():
-    risk = RiskManager(max_price=0.98)
-    req = make_request(price=0.99)
-    approved, reason = risk.check(req, make_portfolio())
-    assert not approved
-    assert "maximum" in reason
-
-
-def test_reject_oversized_order():
-    risk = RiskManager(max_position_size_usdc=200.0)
-    req = make_request(size_usdc=500.0)
-    approved, reason = risk.check(req, make_portfolio())
-    assert not approved
-    assert "exceeds max" in reason
-
-
-def test_reject_insufficient_cash():
-    risk = RiskManager()
-    req = make_request(size_usdc=500.0)
-    snap = make_portfolio(cash_usdc=100.0)
-    approved, reason = risk.check(req, snap)
-    assert not approved
-    assert "cash" in reason.lower()
-
-
-def test_debounce_duplicate():
-    risk = RiskManager(order_debounce_seconds=60.0)
-    req = make_request()
-    snap = make_portfolio()
-    # First submission OK
-    ok, _ = risk.check(req, snap)
+def test_asset_weight_limit(universe, quotes):
+    ok, _ = rm(universe).check(OrderRequest(ticker="VT", side="BUY", value=4_000), quotes["VT"], snap(), TODAY)
     assert ok
-    # Second within debounce window should be rejected
-    ok2, reason = risk.check(req, snap)
-    assert not ok2
-    assert "debounce" in reason.lower()
+    ok, reason = rm(universe).check(OrderRequest(ticker="VT", side="BUY", value=6_000), quotes["VT"], snap(), TODAY)
+    assert not ok and "Peso" in reason
+
+
+def test_class_limit_crypto(universe, quotes):
+    s = snap([("BTC-USD", "USD", 0.018, 50_000.0)])  # ~9% already
+    ok, reason = rm(universe).check(OrderRequest(ticker="BTC-USD", side="BUY", value=200), quotes["BTC-USD"], s, TODAY)
+    assert not ok and "crypto" in reason
+
+
+def test_region_limit_colombia(universe, quotes):
+    # 4,500 USD of 10,000 = 45% in CO → any CO buy rejected
+    t = PositionTracker()
+    t.apply(Transaction(kind="DEPOSIT", currency="USD", gross=5_500.0))
+    t.apply(Transaction(kind="DEPOSIT", currency="COP", gross=4_500 * USDCOP))
+    t.apply(Transaction(kind="BUY", currency="COP", ticker="ICOLCAP.CL", quantity=900, price=20_000.0,
+                        gross=18_000_000.0))
+    t.update_prices(make_quotes(), USDCOP)
+    s = t.snapshot()
+    ok, reason = rm(universe).check(OrderRequest(ticker="ECOPETROL.CL", side="BUY", value=500_000),
+                                    quotes["ECOPETROL.CL"], s, TODAY)
+    assert not ok and "CO" in reason
+
+
+def test_no_short_and_min_size(universe, quotes):
+    ok, reason = rm(universe).check(OrderRequest(ticker="NU", side="SELL", quantity=1), quotes["NU"], snap(), TODAY)
+    assert not ok and "cortos" in reason
+    ok, reason = rm(universe).check(OrderRequest(ticker="NU", side="BUY", value=10), quotes["NU"], snap(), TODAY)
+    assert not ok and "pequeña" in reason

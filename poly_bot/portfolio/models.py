@@ -1,4 +1,4 @@
-"""Portfolio-level data models."""
+"""Portfolio models — multi-currency (COP / USD)."""
 
 from __future__ import annotations
 
@@ -6,60 +6,103 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from poly_bot.execution.models import utcnow
+from poly_bot.market_data.models import Currency
+
+
+def convert(amount: float, from_ccy: str, to_ccy: str, usdcop: float) -> float:
+    """Convert at mid rate (valuation only — trades use the executor's spread)."""
+    if from_ccy == to_ccy:
+        return amount
+    if from_ccy == "USD" and to_ccy == "COP":
+        return amount * usdcop
+    if from_ccy == "COP" and to_ccy == "USD":
+        return amount / usdcop
+    raise ValueError(f"Unsupported conversion {from_ccy}->{to_ccy}")
+
 
 class Position(BaseModel):
-    """An open position in a specific token."""
-
-    token_id: str
-    market_question: str = ""
-    outcome: str = ""  # "Yes" or "No"
-    side: str = "BUY"
-    shares: float = 0.0
-    avg_cost_basis: float = 0.0  # Average price paid per share
-    total_cost_usdc: float = 0.0
-    realized_pnl: float = 0.0
+    ticker: str
+    currency: Currency
+    quantity: float = 0.0
+    avg_cost: float = 0.0  # per share incl. buy commissions, asset currency
+    realized_pnl: float = 0.0  # asset currency
+    dividends: float = 0.0  # net dividends received, asset currency
     strategy: str = ""
-    opened_at: datetime = Field(default_factory=datetime.utcnow)
-    last_updated: datetime = Field(default_factory=datetime.utcnow)
+    opened_at: datetime = Field(default_factory=utcnow)
+    last_price: float | None = None
 
     @property
-    def unrealized_pnl(self, current_price: float = 0.0) -> float:
-        """Unrealized P&L — requires current_price to be set externally."""
-        return 0.0  # Computed by PositionTracker.snapshot() with live prices
+    def cost_basis(self) -> float:
+        return self.quantity * self.avg_cost
+
+    @property
+    def market_value(self) -> float:
+        price = self.last_price if self.last_price is not None else self.avg_cost
+        return self.quantity * price
+
+    @property
+    def unrealized_pnl(self) -> float:
+        return self.market_value - self.cost_basis
+
+    @property
+    def unrealized_pct(self) -> float:
+        return self.unrealized_pnl / self.cost_basis if self.cost_basis > 0 else 0.0
 
 
 class PortfolioSnapshot(BaseModel):
-    """Point-in-time snapshot of portfolio state."""
-
-    cash_usdc: float
+    cash: dict[str, float]
     positions: list[Position] = Field(default_factory=list)
-    total_realized_pnl: float = 0.0
-    total_unrealized_pnl: float = 0.0
-    total_fees_paid: float = 0.0
-    win_count: int = 0
-    loss_count: int = 0
+    usdcop: float
+    base_currency: Currency = "COP"
+    realized_pnl: dict[str, float] = Field(default_factory=dict)  # by currency
+    fees: dict[str, float] = Field(default_factory=dict)
+    dividends: dict[str, float] = Field(default_factory=dict)
+    deposits: dict[str, float] = Field(default_factory=dict)
     trade_count: int = 0
-    taken_at: datetime = Field(default_factory=datetime.utcnow)
+    taken_at: datetime = Field(default_factory=utcnow)
 
-    @property
-    def total_pnl(self) -> float:
-        return self.total_realized_pnl + self.total_unrealized_pnl
+    def to(self, amount: float, from_ccy: str, to_ccy: str | None = None) -> float:
+        return convert(amount, from_ccy, to_ccy or self.base_currency, self.usdcop)
 
-    @property
-    def win_rate(self) -> float:
-        total = self.win_count + self.loss_count
-        return self.win_count / total if total > 0 else 0.0
+    def _sum(self, by_ccy: dict[str, float], ccy: str | None) -> float:
+        return sum(self.to(v, k, ccy) for k, v in by_ccy.items())
 
-    @property
-    def total_position_value(self) -> float:
-        return sum(p.total_cost_usdc for p in self.positions)
+    def cash_value(self, ccy: str | None = None) -> float:
+        return self._sum(self.cash, ccy)
 
-    @property
-    def total_value(self) -> float:
-        return self.cash_usdc + self.total_position_value
+    def positions_value(self, ccy: str | None = None) -> float:
+        return sum(self.to(p.market_value, p.currency, ccy) for p in self.positions)
 
-    def get_position(self, token_id: str) -> Position | None:
+    def total_value(self, ccy: str | None = None) -> float:
+        return self.cash_value(ccy) + self.positions_value(ccy)
+
+    def unrealized_pnl(self, ccy: str | None = None) -> float:
+        return sum(self.to(p.unrealized_pnl, p.currency, ccy) for p in self.positions)
+
+    def realized(self, ccy: str | None = None) -> float:
+        return self._sum(self.realized_pnl, ccy)
+
+    def total_fees(self, ccy: str | None = None) -> float:
+        return self._sum(self.fees, ccy)
+
+    def total_dividends(self, ccy: str | None = None) -> float:
+        return self._sum(self.dividends, ccy)
+
+    def invested(self, ccy: str | None = None) -> float:
+        """Deposits valued at today's rate (so FX moves count as return)."""
+        return self._sum(self.deposits, ccy)
+
+    def value_of(self, ticker: str, ccy: str | None = None) -> float:
+        p = self.get_position(ticker)
+        return self.to(p.market_value, p.currency, ccy) if p else 0.0
+
+    def weight(self, ticker: str) -> float:
+        total = self.total_value()
+        return self.value_of(ticker) / total if total > 0 else 0.0
+
+    def get_position(self, ticker: str) -> Position | None:
         for p in self.positions:
-            if p.token_id == token_id:
+            if p.ticker == ticker:
                 return p
         return None

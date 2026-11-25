@@ -1,350 +1,347 @@
 """
-Bot orchestrator — wires all components together and runs the main event loop.
+Bot orchestrator — runs one cycle per day (after market close, Bogotá time).
 
-Data flow:
-  MarketDataFeed → asyncio.Queue → StrategyRunner → ExecutionEngine → PositionTracker
+Daily cycle:
+  prices (yfinance) → mark-to-market → dividends → strategies → risk → paper fills
+  → daily snapshot → ntfy summary
+
+State lives in the SQLite transaction ledger and is replayed on startup.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Union
+import copy
+from dataclasses import dataclass, field
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any
+from zoneinfo import ZoneInfo
 
 from poly_bot.config.settings import Settings
-from poly_bot.execution.live_executor import LiveExecutor
-from poly_bot.execution.models import Fill, OrderRequest
+from poly_bot.execution.models import OrderRequest, Transaction
 from poly_bot.execution.paper_executor import PaperExecutor
-from poly_bot.market_data.clob_client import AsyncClobClient
-from poly_bot.market_data.feed import MarketDataFeed
-from poly_bot.market_data.gamma_client import GammaClient
-from poly_bot.market_data.models import MarketUpdate
+from poly_bot.market_data.provider import MarketData, PriceProvider, YFinanceProvider
+from poly_bot.market_data.universe import Universe
+from poly_bot.notify.ntfy import NtfyNotifier
+from poly_bot.notify.summary import SummaryInput, build_daily_summary
 from poly_bot.observability.logging import get_logger
 from poly_bot.portfolio.models import PortfolioSnapshot
 from poly_bot.portfolio.position_tracker import PositionTracker
 from poly_bot.risk.manager import RiskManager
-from poly_bot.strategies.base import Signal, StrategyContext
+from poly_bot.store.database import init_db
+from poly_bot.store.trade_store import TradeStore
+from poly_bot.strategies.base import DailyContext, Signal, Strategy
 from poly_bot.strategies.registry import load_strategies
 
 log = get_logger(__name__)
 
-ExecutorType = Union[PaperExecutor, LiveExecutor]
+FX_MIN_USD = 10.0  # don't bother converting less than this
+
+
+@dataclass
+class CycleResult:
+    day: date
+    dry_run: bool
+    executed: list[Transaction] = field(default_factory=list)
+    rejected: list[tuple[Signal, str]] = field(default_factory=list)
+    title: str = ""
+    message: str = ""
+    notified: bool = False
 
 
 class Bot:
-    """
-    Main bot orchestrator.
-    Call run() to start, stop() to shut down gracefully.
-    """
-
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, provider: PriceProvider | None = None) -> None:
         self._settings = settings
-        self._queue: asyncio.Queue[MarketUpdate] = asyncio.Queue(maxsize=200)
-
-        # Build clients
-        private_key = None
-        if settings.private_key:
-            private_key = settings.private_key.get_secret_value()
-
-        self._clob = AsyncClobClient(
-            host=settings.clob_host,
-            chain_id=settings.chain_id,
-            private_key=private_key,
+        self.tz = ZoneInfo(settings.schedule.get("timezone", "America/Bogota"))
+        self.universe = Universe.from_config(settings.universe)
+        md_cfg = settings.market_data
+        self._provider: PriceProvider = provider or YFinanceProvider(
+            fx_ticker=md_cfg.get("fx_ticker", "COP=X"),
+            history_period=md_cfg.get("history_period", "2y"),
+            cache_ttl_minutes=float(md_cfg.get("cache_ttl_minutes", 30)),
         )
-        self._gamma = GammaClient(host=settings.gamma_host)
-
-        # Build executor (paper or live)
-        if settings.mode == "live":
-            log.warning("bot.live_mode_active", msg="REAL MONEY trading is ENABLED")
-            self._executor: ExecutorType = LiveExecutor(self._clob)
-        else:
-            paper_cfg = settings.paper
-            self._executor = PaperExecutor(
-                initial_balance_usdc=settings.paper_initial_balance,
-                fill_mode=paper_cfg.get("fill_mode", "order_book"),
-                simulated_latency_ms=paper_cfg.get("simulated_latency_ms", 200),
-            )
-
-        # Portfolio tracking
-        initial_balance = (
-            settings.paper_initial_balance if settings.mode == "paper" else 0.0
+        self.executor = PaperExecutor(settings.costs)
+        self.risk = RiskManager.from_config(self.universe, settings.risk, md_cfg)
+        self.tracker = PositionTracker(base_currency=settings.base_currency)
+        self.strategies: list[Strategy] = load_strategies(settings.strategies)
+        for s in self.strategies:
+            s.validate(self.universe)
+        self.notifier = NtfyNotifier(
+            settings.ntfy_server, settings.ntfy_topic, settings.ntfy_token, settings.dashboard_url
         )
-        self._portfolio = PositionTracker(initial_balance_usdc=initial_balance)
-
-        # Wire fill events: executor → position tracker
-        self._executor.on_fill(self._on_fill)
-
-        # Risk manager
-        risk_cfg = settings.risk
-        self._risk = RiskManager(
-            max_position_size_usdc=risk_cfg.get("max_position_size_usdc", 500.0),
-            max_total_exposure_usdc=risk_cfg.get("max_total_exposure_usdc", 3000.0),
-            max_position_count=risk_cfg.get("max_position_count", 10),
-            min_market_liquidity_usdc=risk_cfg.get("min_market_liquidity_usdc", 1000.0),
-            min_price=risk_cfg.get("min_price", 0.02),
-            max_price=risk_cfg.get("max_price", 0.98),
-            order_debounce_seconds=risk_cfg.get("order_debounce_seconds", 30.0),
-        )
-
-        # Strategies
-        self._strategies = load_strategies(settings.strategies)
-
-        # Wire agent event callback for AI research strategy
-        from poly_bot.strategies.ai_research import AIResearchStrategy
-        for s in self._strategies:
-            if isinstance(s, AIResearchStrategy):
-                s.on_agent_event(self._on_agent_event)
-
-        # Feed
-        feed_cfg = settings.feed
-        self._feed = MarketDataFeed(
-            clob_client=self._clob,
-            gamma_client=self._gamma,
-            queue=self._queue,
-            poll_interval=feed_cfg.get("poll_interval_seconds", 2.0),
-            market_refresh_interval=feed_cfg.get("market_refresh_seconds", 60.0),
-            max_markets=feed_cfg.get("max_markets", 50),
-            min_liquidity=risk_cfg.get("min_market_liquidity_usdc", 1000.0),
-            min_yes_price=feed_cfg.get("min_yes_price", 0.0),
-            max_yes_price=feed_cfg.get("max_yes_price", 1.0),
-        )
-
+        self.store: TradeStore | None = None
+        self._conn: Any = None
         self._running = False
-        self._db = None
-        self._store = None
+        self._cycle_lock = asyncio.Lock()
+        self._start_lock = asyncio.Lock()
+        self.last_market: MarketData | None = None
+        self.last_cycle: CycleResult | None = None
+        self.next_run_at: datetime | None = None
 
-        log.info(
-            "bot.initialized",
-            mode=settings.mode,
-            strategies=[s.name for s in self._strategies],
-            paper_balance=initial_balance if settings.mode == "paper" else None,
-        )
+    @property
+    def mode(self) -> str:
+        return self._settings.mode
 
-    async def run(self) -> None:
-        """Start all components and run until stopped."""
-        self._running = True
+    @property
+    def running(self) -> bool:
+        return self._running
 
-        # Optional: init DB
-        try:
-            from poly_bot.store.database import init_db
-            from poly_bot.store.trade_store import TradeStore
-            self._db = await init_db()
-            self._store = TradeStore(self._db)
-        except Exception as exc:
-            log.warning("bot.db_init_failed", error=str(exc), msg="Continuing without persistence")
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
-        # Start strategies
-        for s in self._strategies:
+    async def start(self) -> None:
+        """Open DB, rebuild portfolio from the ledger, seed initial cash if new. Idempotent."""
+        async with self._start_lock:
+            if self.store is None:
+                await self._start()
+
+    async def _start(self) -> None:
+        self._conn = await init_db(self._settings.db_path)
+        self.store = TradeStore(self._conn)
+        self.tracker.replay(await self.store.all_transactions())
+        if not self.tracker.has_deposits:
+            for ccy, amount in self._settings.initial_cash.items():
+                if amount > 0:
+                    await self._record(Transaction(
+                        kind="DEPOSIT", currency=ccy, gross=amount,  # type: ignore[arg-type]
+                        rationale="Capital inicial ficticio",
+                    ))
+        # Warm prices from the last run so the dashboard works before the first cycle
+        quotes = await self.store.load_quotes()
+        snaps = await self.store.snapshots(limit=1)
+        if snaps:
+            self.tracker.update_prices(quotes, snaps[-1]["usdcop"])
+        for s in self.strategies:
             await s.on_start()
 
-        log.info("bot.running", strategy_count=len(self._strategies))
-
+    async def run(self) -> None:
+        await self.start()
+        self._running = True
+        log.info("bot.started", strategies=[s.name for s in self.strategies],
+                 universe=len(self.universe), notify=self.notifier.enabled)
         try:
-            await asyncio.gather(
-                self._feed.run(),
-                self._consume_updates(),
-                self._snapshot_loop(),
-            )
+            if self._settings.schedule.get("run_on_start", True) and await self._missed_today():
+                await self._safe_cycle()
+            while self._running:
+                self.next_run_at = self._next_run_time(datetime.now(self.tz))
+                log.info("bot.next_cycle", at=self.next_run_at.isoformat())
+                while self._running and datetime.now(self.tz) < self.next_run_at:
+                    remaining = (self.next_run_at - datetime.now(self.tz)).total_seconds()
+                    await asyncio.sleep(max(0.5, min(remaining, 30.0)))
+                if self._running:
+                    await self._safe_cycle()
         finally:
             await self._shutdown()
 
     async def stop(self) -> None:
         self._running = False
-        await self._feed.stop()
-        log.info("bot.stopping")
-
-    def get_snapshot(self) -> PortfolioSnapshot:
-        return self._portfolio.snapshot()
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
-    async def _consume_updates(self) -> None:
-        """Consume market updates from the queue and dispatch to strategies."""
-        while self._running:
-            try:
-                update = await asyncio.wait_for(self._queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-
-            # Update current price for P&L
-            mid = update.order_book.mid_price
-            yes_token = update.market.yes_token
-            if mid is not None and yes_token:
-                self._portfolio.update_price(yes_token.token_id, mid)
-
-            # Notify paper executor of new book (for resting order matching)
-            if isinstance(self._executor, PaperExecutor):
-                await self._executor.on_market_update(update.order_book)
-
-            # Run all strategies
-            portfolio_snap = self._portfolio.snapshot()
-            for strategy in self._strategies:
-                try:
-                    ctx = StrategyContext(
-                        update=update,
-                        position=self._portfolio.get_position(
-                            yes_token.token_id if yes_token else ""
-                        ),
-                        portfolio=portfolio_snap,
-                        config=self._settings.get_strategy_config(strategy.name),
-                    )
-                    signals = await strategy.on_market_update(ctx)
-                    for signal in signals:
-                        await self._process_signal(signal, update, strategy.name)
-                except Exception as exc:
-                    log.error(
-                        "bot.strategy_error",
-                        strategy=strategy.name,
-                        error=str(exc),
-                        exc_info=True,
-                    )
-
-            self._queue.task_done()
-
-    async def _process_signal(
-        self,
-        signal: Signal,
-        update: MarketUpdate,
-        strategy_name: str,
-    ) -> None:
-        """Risk-check a signal and submit to executor if approved."""
-        portfolio_snap = self._portfolio.snapshot()
-
-        approved, reason = self._risk.check(
-            request=OrderRequest(
-                token_id=signal.token_id,
-                side=signal.side,
-                price=signal.price,
-                size_usdc=signal.size_usdc,
-                strategy=strategy_name,
-            ),
-            portfolio=portfolio_snap,
-            market=update.market,
-        )
-
-        if not approved:
-            log.debug(
-                "bot.signal_rejected",
-                strategy=strategy_name,
-                token_id=signal.token_id,
-                reason=reason,
-            )
-            return
-
-        request = OrderRequest(
-            token_id=signal.token_id,
-            side=signal.side,
-            price=signal.price,
-            size_usdc=signal.size_usdc,
-            order_type=signal.order_type,
-            strategy=strategy_name,
-            rationale=signal.rationale,
-        )
-
-        log.info(
-            "bot.signal_approved",
-            strategy=strategy_name,
-            token_id=signal.token_id,
-            side=signal.side,
-            price=signal.price,
-            size_usdc=signal.size_usdc,
-            rationale=signal.rationale,
-        )
-
-        if isinstance(self._executor, PaperExecutor):
-            report = await self._executor.submit_order_with_book(
-                request, update.order_book
-            )
-        else:
-            report = await self._executor.submit_order(request)
-
-        log.info(
-            "bot.order_result",
-            order_id=report.order_id,
-            status=report.status,
-            fills=len(report.fills),
-        )
-
-    def _on_agent_event(self, event: dict) -> None:
-        """Callback from AI strategy on every research/signal/skip event."""
-        if self._store:
-            asyncio.create_task(self._store.save_agent_event(event))
-        try:
-            from poly_bot.web.api import broadcast_agent_event
-            asyncio.create_task(broadcast_agent_event(event))
-        except Exception:
-            pass
-
-    def _on_fill(self, fill: Fill) -> None:
-        """Callback from executor on every fill."""
-        self._portfolio.on_fill(fill)
-        if self._store:
-            asyncio.create_task(self._store.save_fill(fill))
-        # Push fill to web dashboard
-        try:
-            from poly_bot.web.api import broadcast_fill, broadcast_portfolio
-            asyncio.create_task(broadcast_fill({
-                "fill_id": fill.fill_id,
-                "order_id": fill.order_id,
-                "token_id": fill.token_id,
-                "side": fill.side,
-                "price": fill.price,
-                "size": fill.size,
-                "cost_usdc": fill.cost_usdc,
-                "fee_usdc": fill.fee_usdc,
-                "strategy": fill.strategy,
-                "is_paper": fill.is_paper,
-                "filled_at": fill.filled_at.isoformat(),
-            }))
-            # Also push updated portfolio
-            snap = self._portfolio.snapshot()
-            from poly_bot.portfolio.pnl import format_pnl_summary
-            asyncio.create_task(broadcast_portfolio({
-                "cash_usdc": snap.cash_usdc,
-                "total_value": snap.total_value,
-                "total_position_value": snap.total_position_value,
-                "realized_pnl": snap.total_realized_pnl,
-                "unrealized_pnl": snap.total_unrealized_pnl,
-                "total_pnl": snap.total_pnl,
-                "win_rate": snap.win_rate,
-                "trade_count": snap.trade_count,
-                "win_count": snap.win_count,
-                "loss_count": snap.loss_count,
-                "fees_paid": snap.total_fees_paid,
-            }))
-        except Exception:
-            pass
-
-    async def _snapshot_loop(self, interval_seconds: float = 300.0) -> None:
-        """Save a portfolio snapshot every 5 minutes and push to dashboard."""
-        while self._running:
-            await asyncio.sleep(interval_seconds)
-            if not self._running:
-                break
-            snap = self._portfolio.snapshot()
-            if self._store:
-                await self._store.save_snapshot(snap)
-            try:
-                from poly_bot.web.api import broadcast_equity_point
-                asyncio.create_task(broadcast_equity_point({
-                    "taken_at": snap.taken_at.isoformat(),
-                    "total_value": snap.total_value,
-                    "cash_usdc": snap.cash_usdc,
-                    "realized_pnl": snap.total_realized_pnl,
-                    "unrealized_pnl": snap.total_unrealized_pnl,
-                    "trade_count": snap.trade_count,
-                    "fees_paid": snap.total_fees_paid,
-                }))
-            except Exception:
-                pass
-            log.info("bot.snapshot_saved", total_value=snap.total_value)
 
     async def _shutdown(self) -> None:
-        for s in self._strategies:
+        for s in self.strategies:
             await s.on_stop()
-        await self._clob.close()
-        await self._gamma.close()
-        if self._db:
-            await self._db.close()
-        log.info("bot.shutdown_complete")
+        if self._conn is not None:
+            await self._conn.close()
+            self._conn = None
+            self.store = None
+        log.info("bot.stopped")
+
+    def _next_run_time(self, now: datetime) -> datetime:
+        hh, mm = (int(x) for x in str(self._settings.schedule.get("daily_run_time", "17:00")).split(":"))
+        weekdays_only = self._settings.schedule.get("weekdays_only", True)
+        candidate = datetime.combine(now.date(), time(hh, mm), tzinfo=self.tz)
+        if candidate <= now:
+            candidate += timedelta(days=1)
+        while weekdays_only and candidate.weekday() >= 5:
+            candidate += timedelta(days=1)
+        return candidate
+
+    async def _missed_today(self) -> bool:
+        """True if today's cycle hasn't run yet (avoids re-notifying on every restart)."""
+        assert self.store is not None
+        today = datetime.now(self.tz).date()
+        snaps = await self.store.snapshots(limit=1)
+        return not snaps or snaps[-1]["day"] != today.isoformat()
+
+    async def _safe_cycle(self) -> None:
+        try:
+            await self.run_cycle()
+        except Exception as exc:  # keep the scheduler alive; report the failure
+            log.exception("bot.cycle_failed", error=str(exc))
+            if self.store:
+                await self.store.save_event("error", reasoning=str(exc))
+            await self.notifier.send(f"El ciclo diario falló: {exc}", title="⚠️ Invest bot: error",
+                                     tags=["warning"], priority=4)
+
+    # ------------------------------------------------------------------
+    # Daily cycle
+    # ------------------------------------------------------------------
+
+    def snapshot(self) -> PortfolioSnapshot | None:
+        return self.tracker.snapshot() if self.tracker.usdcop else None
+
+    async def run_cycle(self, dry_run: bool = False, notify: bool = True) -> CycleResult:
+        await self.start()
+        assert self.store is not None
+        async with self._cycle_lock:
+            today = datetime.now(self.tz).date()
+            cycle_start = datetime.now(timezone.utc)
+            result = CycleResult(day=today, dry_run=dry_run)
+
+            md = await self._provider.fetch(list(self.universe))
+            self.last_market = md
+            tracker = copy.deepcopy(self.tracker) if dry_run else self.tracker
+            tracker.update_prices(md.quotes, md.usdcop)
+            if not dry_run:
+                await self.store.save_quotes(md.quotes)
+                await self._credit_dividends(tracker, md, today, result)
+
+            for strategy in self.strategies:
+                last = await self.store.last_event_time(strategy.name, "signals")
+                ctx = DailyContext(
+                    today=today, quotes=md.quotes, usdcop=md.usdcop,
+                    portfolio=tracker.snapshot(), universe=self.universe,
+                    last_signal_date=last.astimezone(self.tz).date() if last else None,
+                )
+                signals = await strategy.on_daily(ctx)
+                if not signals:
+                    continue
+                log.info("bot.signals", strategy=strategy.name, count=len(signals))
+                if not dry_run:
+                    await self.store.save_event(
+                        "signals", strategy=strategy.name,
+                        reasoning=signals[0].rationale.split(":")[0],
+                        payload={"signals": [s.__dict__ for s in signals]},
+                    )
+                await self._execute(strategy.name, signals, tracker, md, today, result, dry_run)
+
+            snap = tracker.snapshot()
+            benchmarks = {a.ticker: md.quotes[a.ticker].price
+                          for a in self.universe.benchmarks if a.ticker in md.quotes}
+            if not dry_run:
+                await self.store.save_snapshot(today, snap, benchmarks)
+
+            # Summary
+            txs_today = [t.model_dump() for t in result.executed] if dry_run else \
+                await self.store.transactions_since(cycle_start)
+            notes = [f"⛔ Rechazadas {len(result.rejected)}: " + "; ".join(
+                f"{s.ticker}: {r}" for s, r in result.rejected[:3])] if result.rejected else []
+            if dry_run:
+                notes.insert(0, "🧪 DRY RUN — nada se ejecutó")
+            inp = SummaryInput(
+                snap=snap, quotes=md.quotes, universe=self.universe,
+                prev_snapshot=await self.store.snapshot_before(today),
+                first_snapshot=await self.store.first_snapshot(),
+                benchmarks_now=benchmarks, transactions_today=txs_today, notes=notes,
+            )
+            result.title, result.message, tags = build_daily_summary(inp)
+            if notify and not dry_run:
+                result.notified = await self.notifier.send(result.message, title=result.title, tags=tags)
+                await self.store.save_event("cycle", payload={
+                    "executed": len(result.executed), "rejected": len(result.rejected),
+                    "value_base": snap.total_value(), "notified": result.notified,
+                })
+            if not dry_run:
+                self.last_cycle = result
+            log.info("bot.cycle_done", day=str(today), executed=len(result.executed),
+                     rejected=len(result.rejected), value_cop=round(snap.total_value("COP")),
+                     dry_run=dry_run)
+            return result
+
+    async def _credit_dividends(self, tracker: PositionTracker, md: MarketData,
+                                today: date, result: CycleResult) -> None:
+        assert self.store is not None
+        for pos in list(tracker.snapshot().positions):
+            asset = self.universe.get(pos.ticker)
+            if asset is None:
+                continue
+            opened = pos.opened_at.astimezone(self.tz).date()
+            for d in md.dividends.get(pos.ticker, []):
+                if not (opened < d.ex_date <= today):
+                    continue
+                if await self.store.dividend_recorded(pos.ticker, d.ex_date):
+                    continue
+                gross = pos.quantity * d.amount_per_share
+                withholding = self.executor.dividend_withholding.get(asset.market, 0.0)
+                tx = Transaction(
+                    kind="DIVIDEND", currency=asset.currency, ticker=pos.ticker,
+                    quantity=pos.quantity, price=d.amount_per_share, gross=gross,
+                    fee=gross * withholding, strategy=pos.strategy,
+                    rationale=f"Dividendo ex {d.ex_date} (retención {withholding:.0%})",
+                    occurred_at=datetime.combine(d.ex_date, time(0), tzinfo=timezone.utc),
+                )
+                await self._record(tx, tracker)
+                result.executed.append(tx)
+
+    async def _execute(self, strategy: str, signals: list[Signal], tracker: PositionTracker,
+                       md: MarketData, today: date, result: CycleResult, dry_run: bool) -> None:
+        sells = [s for s in signals if s.side == "SELL"]
+        buys = [s for s in signals if s.side == "BUY"]
+        for sig in sells:
+            await self._execute_one(strategy, sig, tracker, md, today, result, dry_run)
+        if buys:
+            await self._fund_buys(strategy, buys, tracker, md, result, dry_run)
+        for sig in buys:
+            await self._execute_one(strategy, sig, tracker, md, today, result, dry_run)
+
+    async def _execute_one(self, strategy: str, sig: Signal, tracker: PositionTracker,
+                           md: MarketData, today: date, result: CycleResult,
+                           dry_run: bool) -> None:
+        req = OrderRequest(ticker=sig.ticker, side=sig.side, value=sig.value,
+                           quantity=sig.quantity, strategy=strategy, rationale=sig.rationale)
+        quote = md.quotes.get(sig.ticker)
+        ok, reason = self.risk.check(req, quote, tracker.snapshot(), today)
+        if not ok or quote is None:
+            result.rejected.append((sig, reason))
+            log.info("risk.rejected", ticker=sig.ticker, side=sig.side, reason=reason)
+            if not dry_run and self.store:
+                await self.store.save_event("rejected", strategy=strategy, ticker=sig.ticker,
+                                            decision=sig.side, reasoning=reason)
+            return
+        asset = self.universe.require(sig.ticker)
+        report = self.executor.execute(
+            req, asset, quote,
+            cash_available=max(0.0, tracker.cash.get(asset.currency, 0.0)),
+            held_quantity=tracker.held_quantity(sig.ticker),
+        )
+        if not report.is_filled or report.transaction is None:
+            result.rejected.append((sig, report.rejection_reason))
+            return
+        await self._record(report.transaction, tracker, persist=not dry_run)
+        result.executed.append(report.transaction)
+
+    async def _fund_buys(self, strategy: str, buys: list[Signal], tracker: PositionTracker,
+                         md: MarketData, result: CycleResult, dry_run: bool) -> None:
+        """Convert COP↔USD so each currency has enough cash for its buys."""
+        need: dict[str, float] = {"COP": 0.0, "USD": 0.0}
+        for sig in buys:
+            asset = self.universe.get(sig.ticker)
+            if asset is None or sig.value is None:
+                continue
+            c = self.executor.costs_for(asset)
+            need[asset.currency] += sig.value * (1 + c.slippage_pct) * (1 + c.commission_pct) \
+                + c.min_commission
+        spare = {ccy: tracker.cash.get(ccy, 0.0) - need[ccy] for ccy in need}
+        for to_ccy, from_ccy in (("USD", "COP"), ("COP", "USD")):
+            shortfall = -spare[to_ccy]
+            if shortfall <= 0 or spare[from_ccy] <= 0:
+                continue
+            from_needed = self.executor.from_amount_for(from_ccy, shortfall, md.usdcop)  # type: ignore[arg-type]
+            from_amount = min(from_needed, spare[from_ccy])
+            usd_equiv = from_amount if from_ccy == "USD" else from_amount / md.usdcop
+            if usd_equiv < FX_MIN_USD:
+                continue
+            tx = self.executor.convert(
+                from_ccy, to_ccy, from_amount, md.usdcop,  # type: ignore[arg-type]
+                strategy=strategy, rationale=f"Fondear compras en {to_ccy}",
+            )
+            await self._record(tx, tracker, persist=not dry_run)
+            result.executed.append(tx)
+            spare[from_ccy] -= from_amount
+            spare[to_ccy] += tx.gross
+
+    async def _record(self, tx: Transaction, tracker: PositionTracker | None = None,
+                      persist: bool = True) -> None:
+        (tracker or self.tracker).apply(tx)
+        if persist and self.store is not None:
+            await self.store.save_transaction(tx)

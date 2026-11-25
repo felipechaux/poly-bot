@@ -1,15 +1,19 @@
 """
-Risk manager — pre-trade checks executed before every order submission.
-All checks are synchronous and stateless (reads from portfolio snapshot).
+Risk manager — pre-trade checks run before every order.
+
+Limits are expressed as weights of total portfolio value (base currency):
+per asset, per asset class, per region. Also: whitelist (universe), stale prices,
+minimum order size and no short selling.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date
 from typing import Any
 
 from poly_bot.execution.models import OrderRequest
-from poly_bot.market_data.models import Market
+from poly_bot.market_data.models import Asset, Quote
+from poly_bot.market_data.universe import Universe
 from poly_bot.observability.logging import get_logger
 from poly_bot.portfolio.models import PortfolioSnapshot
 
@@ -19,77 +23,105 @@ log = get_logger(__name__)
 class RiskManager:
     def __init__(
         self,
-        max_position_size_usdc: float = 500.0,
-        max_total_exposure_usdc: float = 3000.0,
-        max_position_count: int = 10,
-        min_market_liquidity_usdc: float = 1000.0,
-        min_price: float = 0.02,
-        max_price: float = 0.98,
-        order_debounce_seconds: float = 30.0,
+        universe: Universe,
+        max_weight_per_asset: float = 0.5,
+        max_weight_per_class: dict[str, float] | None = None,
+        max_weight_per_region: dict[str, float] | None = None,
+        min_order_value_usd: float = 25.0,
+        max_stale_days: int = 5,
+        allow_short: bool = False,
     ) -> None:
-        self._max_position = max_position_size_usdc
-        self._max_exposure = max_total_exposure_usdc
-        self._max_positions = max_position_count
-        self._min_liquidity = min_market_liquidity_usdc
-        self._min_price = min_price
-        self._max_price = max_price
-        self._debounce_seconds = order_debounce_seconds
-        self._recent_orders: dict[str, datetime] = {}  # debounce key -> last time
+        self._universe = universe
+        self._max_asset = max_weight_per_asset
+        self._max_class = max_weight_per_class or {}
+        self._max_region = max_weight_per_region or {}
+        self._min_order_usd = min_order_value_usd
+        self._max_stale_days = max_stale_days
+        self._allow_short = allow_short
+
+    @classmethod
+    def from_config(cls, universe: Universe, risk: dict[str, Any], market_data: dict[str, Any]) -> "RiskManager":
+        return cls(
+            universe=universe,
+            max_weight_per_asset=float(risk.get("max_weight_per_asset", 0.5)),
+            max_weight_per_class=risk.get("max_weight_per_class") or {},
+            max_weight_per_region=risk.get("max_weight_per_region") or {},
+            min_order_value_usd=float(risk.get("min_order_value_usd", 25.0)),
+            max_stale_days=int(market_data.get("max_stale_days", 5)),
+            allow_short=bool(risk.get("allow_short", False)),
+        )
+
+    def _group_weight(self, snap: PortfolioSnapshot, attr: str, value: str) -> float:
+        total = snap.total_value()
+        if total <= 0:
+            return 0.0
+        acc = 0.0
+        for p in snap.positions:
+            a = self._universe.get(p.ticker)
+            if a and getattr(a, attr) == value:
+                acc += snap.to(p.market_value, p.currency)
+        return acc / total
+
+    def is_stale(self, quote: Quote, today: date) -> bool:
+        return (today - quote.as_of).days > self._max_stale_days
 
     def check(
         self,
         request: OrderRequest,
-        portfolio: PortfolioSnapshot,
-        market: Market | None = None,
+        quote: Quote | None,
+        snap: PortfolioSnapshot,
+        today: date,
     ) -> tuple[bool, str]:
-        """
-        Run all pre-trade checks.
-        Returns (approved, reason). approved=True means OK to proceed.
-        """
-        # 1. Price sanity — reject near-resolved markets
-        if request.price < self._min_price:
-            return False, f"Price {request.price:.3f} below minimum {self._min_price}"
-        if request.price > self._max_price:
-            return False, f"Price {request.price:.3f} above maximum {self._max_price}"
+        asset: Asset | None = self._universe.get(request.ticker)
+        if asset is None:
+            return False, f"{request.ticker} no está en el universo permitido"
+        if quote is None:
+            return False, f"Sin precio para {request.ticker}"
+        if self.is_stale(quote, today):
+            return False, f"Precio de {request.ticker} desactualizado ({quote.as_of})"
 
-        # 2. Order size
-        if request.size_usdc > self._max_position:
-            return False, f"Order size ${request.size_usdc:.2f} exceeds max ${self._max_position:.2f}"
+        if request.value is not None:
+            value_ccy = request.value
+        elif request.quantity is not None:
+            value_ccy = request.quantity * quote.price
+        else:
+            return False, "Orden sin valor ni cantidad"
+        value_usd = snap.to(value_ccy, asset.currency, "USD")
+        value_base = snap.to(value_ccy, asset.currency)
 
-        # 3. Total portfolio exposure
-        new_exposure = portfolio.total_position_value + request.size_usdc
-        if request.side == "BUY" and new_exposure > self._max_exposure:
-            return False, (
-                f"Total exposure ${new_exposure:.2f} would exceed max ${self._max_exposure:.2f}"
+        if request.side == "SELL":
+            held = snap.get_position(request.ticker)
+            if held is None and not self._allow_short:
+                return False, f"Sin posición en {request.ticker} (no se permiten cortos)"
+            closing = held is not None and request.quantity is not None and (
+                request.quantity >= held.quantity - 1e-9
             )
+            if not closing and value_usd < self._min_order_usd:
+                return False, f"Orden muy pequeña (US$ {value_usd:.2f} < {self._min_order_usd})"
+            return True, ""
 
-        # 4. Position count
-        existing = portfolio.get_position(request.token_id) if hasattr(portfolio, 'get_position') else None
-        if request.side == "BUY" and existing is None:
-            if len(portfolio.positions) >= self._max_positions:
-                return False, f"Max position count {self._max_positions} reached"
+        if value_usd < self._min_order_usd:
+            return False, f"Orden muy pequeña (US$ {value_usd:.2f} < {self._min_order_usd})"
 
-        # 5. Cash check
-        if request.side == "BUY" and request.size_usdc > portfolio.cash_usdc:
-            return False, f"Insufficient cash: ${portfolio.cash_usdc:.2f} < ${request.size_usdc:.2f}"
+        total = snap.total_value()
+        if total <= 0:
+            return False, "Portafolio sin valor"
+        add = value_base / total
 
-        # 6. Market liquidity
-        if market and market.liquidity < self._min_liquidity:
-            return False, f"Market liquidity ${market.liquidity:.0f} below minimum ${self._min_liquidity:.0f}"
+        w = snap.weight(request.ticker) + add
+        if w > self._max_asset + 1e-9:
+            return False, f"Peso de {request.ticker} sería {w:.1%} > máx {self._max_asset:.0%}"
 
-        # 7. Duplicate order debounce
-        debounce_key = f"{request.token_id}:{request.side}:{request.price:.3f}"
-        last = self._recent_orders.get(debounce_key)
-        if last and (datetime.utcnow() - last).total_seconds() < self._debounce_seconds:
-            return False, f"Duplicate signal within debounce window ({self._debounce_seconds}s)"
+        cls_limit = self._max_class.get(asset.asset_class)
+        if cls_limit is not None:
+            w = self._group_weight(snap, "asset_class", asset.asset_class) + add
+            if w > cls_limit + 1e-9:
+                return False, f"Clase {asset.asset_class} sería {w:.1%} > máx {cls_limit:.0%}"
 
-        # All checks passed
-        self._recent_orders[debounce_key] = datetime.utcnow()
-        self._cleanup_debounce()
+        reg_limit = self._max_region.get(asset.region)
+        if reg_limit is not None:
+            w = self._group_weight(snap, "region", asset.region) + add
+            if w > reg_limit + 1e-9:
+                return False, f"Región {asset.region} sería {w:.1%} > máx {reg_limit:.0%}"
+
         return True, ""
-
-    def _cleanup_debounce(self) -> None:
-        cutoff = datetime.utcnow() - timedelta(seconds=self._debounce_seconds * 2)
-        expired = [k for k, v in self._recent_orders.items() if v < cutoff]
-        for k in expired:
-            del self._recent_orders[k]
