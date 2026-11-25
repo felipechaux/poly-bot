@@ -7,6 +7,7 @@ Rebalances when:
   - any target drifts more than `drift_band` (absolute weight) from its target.
 
 Positions this strategy owns that are no longer in `targets` are sold.
+`portfolio_share` < 1 leaves room for satellite strategies (e.g. llm_analyst).
 Order sizes are differences between target and current value; tiny orders below the
 risk manager's minimum are dropped there.
 """
@@ -29,6 +30,10 @@ class CoreAllocationStrategy(Strategy):
         self.targets: dict[str, float] = {str(k): float(v) for k, v in raw.items()}
         self.drift_band = float(self._param("drift_band", 0.05))
         self.cash_buffer = float(self._param("cash_buffer_pct", 0.01))
+        # Fraction of the whole portfolio the core manages (rest = satellite sleeves)
+        self.portfolio_share = float(self._param("portfolio_share", 1.0))
+        if not 0 < self.portfolio_share <= 1:
+            raise ValueError("core_allocation portfolio_share must be in (0, 1]")
         total = sum(self.targets.values())
         if not self.targets or abs(total - 1.0) > 1e-6:
             raise ValueError(f"core_allocation targets must sum to 1.0 (got {total:.4f})")
@@ -44,14 +49,15 @@ class CoreAllocationStrategy(Strategy):
         if (ctx.today.year, ctx.today.month) != (ctx.last_signal_date.year, ctx.last_signal_date.month):
             return "rebalanceo mensual"
         snap = ctx.portfolio
-        for t, w in self.targets.items():
-            drift = snap.weight(t) - w * (1 - self.cash_buffer)
+        for t, w in self.target_weights().items():
+            drift = snap.weight(t) - w
             if abs(drift) > self.drift_band:
                 return f"desviación de {t} ({drift:+.1%})"
         return None
 
     def target_weights(self) -> dict[str, float]:
-        return {t: w * (1 - self.cash_buffer) for t, w in self.targets.items()}
+        scale = self.portfolio_share * (1 - self.cash_buffer)
+        return {t: w * scale for t, w in self.targets.items()}
 
     async def on_daily(self, ctx: DailyContext) -> list[Signal]:
         reason = self.rebalance_reason(ctx)

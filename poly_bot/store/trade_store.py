@@ -178,6 +178,36 @@ class TradeStore:
             out.append(d)
         return out
 
+    async def last_event(self, strategy: str, event_type: str) -> dict[str, Any] | None:
+        cur = await self._conn.execute(
+            "SELECT * FROM agent_events WHERE strategy=? AND event_type=? ORDER BY id DESC LIMIT 1",
+            (strategy, event_type),
+        )
+        r = await cur.fetchone()
+        if not r:
+            return None
+        d = dict(r)
+        d["payload"] = json.loads(d["payload"] or "{}")
+        return d
+
+    async def events(self, event_type: str, since: datetime | None = None,
+                     strategy: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM agent_events WHERE event_type=?"
+        args: list[Any] = [event_type]
+        if since is not None:
+            sql += " AND occurred_at >= ?"
+            args.append(since.isoformat())
+        if strategy is not None:
+            sql += " AND strategy=?"
+            args.append(strategy)
+        cur = await self._conn.execute(sql + " ORDER BY id", args)
+        out = []
+        for r in await cur.fetchall():
+            d = dict(r)
+            d["payload"] = json.loads(d["payload"] or "{}")
+            out.append(d)
+        return out
+
     async def last_event_time(self, strategy: str, event_type: str) -> datetime | None:
         cur = await self._conn.execute(
             "SELECT occurred_at FROM agent_events WHERE strategy=? AND event_type=?"

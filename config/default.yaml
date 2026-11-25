@@ -14,7 +14,7 @@ portfolio:
 # --- Ciclo diario ---
 schedule:
   timezone: America/Bogota
-  daily_run_time: "17:00"       # después del cierre BVC (~15:55) y NYSE (15:00 Bogotá)
+  daily_run_time: "08:00"       # antes de la apertura (NYSE ~8:30, BVC 9:30 Bogotá); usa cierres del día anterior
   run_on_start: true            # al arrancar, corre el ciclo si hoy aún no se ha corrido
   weekdays_only: true
 
@@ -56,7 +56,8 @@ strategies:
       rebalance: monthly        # primer ciclo hábil de cada mes
       drift_band: 0.05          # o si un activo se desvía > 5 pp del objetivo
       cash_buffer_pct: 0.01     # deja 1% en caja para comisiones
-      targets:                  # pesos sobre el valor total (deben sumar 1.0)
+      portfolio_share: 0.85     # la core usa 85%; el 15% restante es la cartera satélite del LLM
+      targets:                  # pesos dentro de la core (deben sumar 1.0)
         VT: 0.45                # global
         QQQ: 0.15               # global (tech US)
         ICOLCAP.CL: 0.10        # Colombia (ETF COLCAP, en COP)
@@ -65,6 +66,30 @@ strategies:
         BND: 0.10               # bonos
         GLD: 0.07               # oro
         BTC-USD: 0.03           # cripto
+
+  # Analista LLM: 1 llamada diaria a `claude -p` (suscripción, sin API key).
+  # Solo opera tickers del universo que NO están en la core, dentro de la cartera satélite.
+  llm_analyst:
+    enabled: true
+    params:
+      model: sonnet
+      sleeve_pct: 0.15          # máx. del total que maneja el LLM
+      max_position_pct: 0.05    # máx. por posición (del total)
+      max_positions: 5
+      max_new_per_day: 2
+      min_confidence: 0.70      # solo ejecuta ideas con confianza >= 0.70
+      stop_loss_pct: 0.15       # vende si una posición satélite cae 15% desde el costo
+      timeout_seconds: 300
+      max_budget_usd: 1.00      # tope de costo equivalente por llamada (--max-budget-usd)
+      news_max_items: 30
+      news_max_age_hours: 48
+      feeds:
+        - {name: "Valora Analitik", url: "https://www.valoraanalitik.com/feed/"}
+        - {name: "La República",    url: "https://www.larepublica.co/rss/"}
+        - {name: "Portafolio",      url: "https://www.portafolio.co/rss/economia.xml"}
+        - {name: "Google News CO",  url: "https://news.google.com/rss/search?q=bolsa+de+valores+colombia+OR+colcap+OR+ecopetrol&hl=es-419&gl=CO&ceid=CO:es-419"}
+        - {name: "CNBC",            url: "https://www.cnbc.com/id/100003114/device/rss/rss.html"}
+        - {name: "MarketWatch",     url: "https://feeds.content.dowjones.io/public/rss/mw_topstories"}
 
 # --- Universo seguido ---
 # market: BVC | US | CRYPTO  ·  currency se infiere del market (BVC→COP, resto→USD)

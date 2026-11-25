@@ -36,6 +36,7 @@ from poly_bot.strategies.registry import load_strategies
 log = get_logger(__name__)
 
 FX_MIN_USD = 10.0  # don't bother converting less than this
+SCORE_HORIZONS = (1, 7, 30)  # days after a recommendation to score it
 
 
 @dataclass
@@ -157,11 +158,21 @@ class Bot:
         return candidate
 
     async def _missed_today(self) -> bool:
-        """True if today's cycle hasn't run yet (avoids re-notifying on every restart)."""
+        """True if today's scheduled time has passed and the cycle hasn't run yet.
+
+        Avoids re-notifying on every restart and running early (e.g. a 6am restart)."""
         assert self.store is not None
-        today = datetime.now(self.tz).date()
+        now = datetime.now(self.tz)
         snaps = await self.store.snapshots(limit=1)
-        return not snaps or snaps[-1]["day"] != today.isoformat()
+        if snaps and snaps[-1]["day"] == now.date().isoformat():
+            return False
+        if not snaps:
+            return True  # brand-new portfolio: allocate right away
+        hh, mm = (int(x) for x in str(self._settings.schedule.get("daily_run_time", "08:00")).split(":"))
+        weekdays_only = self._settings.schedule.get("weekdays_only", True)
+        if weekdays_only and now.weekday() >= 5:
+            return False
+        return now.time() >= time(hh, mm)
 
     async def _safe_cycle(self) -> None:
         try:
@@ -196,14 +207,28 @@ class Bot:
                 await self.store.save_quotes(md.quotes)
                 await self._credit_dividends(tracker, md, today, result)
 
+            if not dry_run:
+                await self._score_recommendations(md, today)
+            track_record = await self._track_record()
+
+            strategy_notes: list[str] = []
             for strategy in self.strategies:
                 last = await self.store.last_event_time(strategy.name, "signals")
                 ctx = DailyContext(
                     today=today, quotes=md.quotes, usdcop=md.usdcop,
                     portfolio=tracker.snapshot(), universe=self.universe,
                     last_signal_date=last.astimezone(self.tz).date() if last else None,
+                    extra={
+                        "dry_run": dry_run,
+                        "cached_analysis": await self._todays_event(strategy.name, "analysis", today),
+                        "track_record": track_record,
+                    },
                 )
                 signals = await strategy.on_daily(ctx)
+                strategy_notes += ctx.notes
+                if not dry_run:
+                    for ev in ctx.events:
+                        await self.store.save_event(**ev)
                 if not signals:
                     continue
                 log.info("bot.signals", strategy=strategy.name, count=len(signals))
@@ -226,6 +251,7 @@ class Bot:
                 await self.store.transactions_since(cycle_start)
             notes = [f"⛔ Rechazadas {len(result.rejected)}: " + "; ".join(
                 f"{s.ticker}: {r}" for s, r in result.rejected[:3])] if result.rejected else []
+            notes = strategy_notes + notes
             if dry_run:
                 notes.insert(0, "🧪 DRY RUN — nada se ejecutó")
             inp = SummaryInput(
@@ -247,6 +273,61 @@ class Bot:
                      rejected=len(result.rejected), value_cop=round(snap.total_value("COP")),
                      dry_run=dry_run)
             return result
+
+    # ------------------------------------------------------------------
+    # LLM decision journal
+    # ------------------------------------------------------------------
+
+    async def _todays_event(self, strategy: str, event_type: str, today: date) -> dict[str, Any] | None:
+        assert self.store is not None
+        ev = await self.store.last_event(strategy, event_type)
+        if ev and datetime.fromisoformat(ev["occurred_at"]).astimezone(self.tz).date() == today:
+            payload: dict[str, Any] = ev["payload"]
+            return payload
+        return None
+
+    async def _score_recommendations(self, md: MarketData, today: date) -> None:
+        """Record 1/7/30-day outcomes of past recommendations (executed or not)."""
+        assert self.store is not None
+        since = datetime.now(timezone.utc) - timedelta(days=max(SCORE_HORIZONS) + 10)
+        recs = await self.store.events("recommendation", since=since)
+        done = {(o["payload"].get("rec_id"), o["payload"].get("horizon_days"))
+                for o in await self.store.events("outcome", since=since)}
+        for rec in recs:
+            p = rec["payload"]
+            quote = md.quotes.get(rec["ticker"])
+            if quote is None or not p.get("price_at"):
+                continue
+            age = (today - datetime.fromisoformat(rec["occurred_at"]).astimezone(self.tz).date()).days
+            for h in SCORE_HORIZONS:
+                if age < h or (rec["id"], h) in done:
+                    continue
+                ret = quote.price / float(p["price_at"]) - 1
+                hit = ret > 0 if rec["decision"] == "BUY" else ret < 0
+                await self.store.save_event(
+                    "outcome", strategy=rec["strategy"], ticker=rec["ticker"], decision=rec["decision"],
+                    payload={"rec_id": rec["id"], "horizon_days": h, "ret": ret, "hit": hit,
+                             "planned": p.get("planned", False), "confianza": p.get("confianza")},
+                )
+
+    async def _track_record(self, limit: int = 8) -> str:
+        """Compact text of recent recommendations + 7-day outcomes, fed back to the LLM."""
+        assert self.store is not None
+        since = datetime.now(timezone.utc) - timedelta(days=60)
+        outcomes = {(o["payload"]["rec_id"], o["payload"]["horizon_days"]): o["payload"]
+                    for o in await self.store.events("outcome", since=since)}
+        recs = (await self.store.events("recommendation", since=since))[-limit:]
+        lines = []
+        for r in recs:
+            day = r["occurred_at"][:10]
+            res = []
+            for h in SCORE_HORIZONS:
+                o = outcomes.get((r["id"], h))
+                if o:
+                    res.append(f"{h}d {o['ret'] * 100:+.1f}% {'✓' if o['hit'] else '✗'}")
+            lines.append(f"- {day} {r['decision']} {r['ticker']} (conf {r['payload'].get('confianza')}): "
+                         + (", ".join(res) or "sin resultado aún"))
+        return "\n".join(lines)
 
     async def _credit_dividends(self, tracker: PositionTracker, md: MarketData,
                                 today: date, result: CycleResult) -> None:

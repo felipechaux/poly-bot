@@ -149,6 +149,62 @@ def create_app(bot: "Bot") -> FastAPI:
             })
         return {"assets": rows}
 
+    @app.get("/api/llm")
+    async def llm(days: int = 30) -> dict[str, Any]:
+        """Claude usage, latest analysis, decision journal and hit rates."""
+        from datetime import timedelta
+
+        store = _store()
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        analyses = await store.events("analysis", since=since)
+        recs = await store.events("recommendation", since=since - timedelta(days=30))
+        outcomes = await store.events("outcome", since=since - timedelta(days=30))
+        by_rec: dict[int, dict[int, Any]] = defaultdict(dict)
+        for o in outcomes:
+            by_rec[o["payload"]["rec_id"]][o["payload"]["horizon_days"]] = o["payload"]
+
+        def _sum(evs: list[dict[str, Any]], key: str) -> float:
+            return sum(float(e["payload"].get("usage", {}).get(key, 0) or 0) for e in evs)
+
+        today = datetime.now(bot.tz).date().isoformat()
+        todays = [a for a in analyses
+                  if datetime.fromisoformat(a["occurred_at"]).astimezone(bot.tz).date().isoformat() == today]
+        hit_rates: dict[str, Any] = {}
+        for h in (1, 7, 30):
+            scored = [o["payload"] for o in outcomes if o["payload"]["horizon_days"] == h]
+            hit_rates[f"{h}d"] = {
+                "n": len(scored),
+                "hit_rate": (sum(1 for o in scored if o["hit"]) / len(scored)) if scored else None,
+                "avg_ret": (sum(o["ret"] for o in scored) / len(scored)) if scored else None,
+            }
+        latest = analyses[-1] if analyses else None
+        return {
+            "usage": {
+                "calls_today": len(todays),
+                "tokens_today": _sum(todays, "total_tokens"),
+                "cost_equiv_today": _sum(todays, "cost_usd_equiv"),
+                f"calls_{days}d": len(analyses),
+                f"tokens_{days}d": _sum(analyses, "total_tokens"),
+                f"cost_equiv_{days}d": _sum(analyses, "cost_usd_equiv"),
+                "avg_duration_ms": (_sum(analyses, "duration_ms") / len(analyses)) if analyses else None,
+            },
+            "latest": {
+                "occurred_at": latest["occurred_at"],
+                "resumen_mercado": latest["payload"].get("resumen_mercado"),
+                "acciones": latest["payload"].get("acciones", []),
+                "usage": latest["payload"].get("usage", {}),
+            } if latest else None,
+            "hit_rates": hit_rates,
+            "journal": [
+                {"id": r["id"], "day": r["occurred_at"][:10], "ticker": r["ticker"],
+                 "decision": r["decision"], "reasoning": r["reasoning"],
+                 "confianza": r["payload"].get("confianza"), "peso": r["payload"].get("peso_objetivo"),
+                 "price_at": r["payload"].get("price_at"), "planned": r["payload"].get("planned"),
+                 "outcomes": {f"{h}d": by_rec.get(r["id"], {}).get(h) for h in (1, 7, 30)}}
+                for r in reversed(recs[-50:])
+            ],
+        }
+
     @app.get("/api/events")
     async def events(limit: int = 100) -> dict[str, Any]:
         return {"events": await _store().recent_events(limit=limit)}
