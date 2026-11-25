@@ -83,9 +83,9 @@
   </section>
 
   <section class="card">
-    <h2>Analista Claude</h2>
-    <div class="grid" id="llm-kpis" style="margin-bottom:12px"></div>
-    <pre id="llm-summary" class="muted">—</pre>
+    <h2>Analistas IA — Claude vs Gemini</h2>
+    <div class="table-wrap"><table id="llm-compare"></table></div>
+    <div id="llm-summaries" style="margin-top:10px"></div>
     <div class="table-wrap" style="margin-top:10px"><table id="llm-journal"></table></div>
   </section>
 
@@ -200,21 +200,30 @@ function equity(snaps) {
 }
 
 function llm(d) {
-  const u = d.usage || {}, hr = d.hit_rates || {};
+  const A = d.analysts || [];
   const k = (v) => v >= 1000 ? (v / 1000).toFixed(1) + "k" : String(Math.round(v || 0));
-  const cards = [
-    ["Tokens hoy", k(u.tokens_today), `${u.calls_today || 0} llamada(s)`],
-    ["Tokens 30 días", k(u.tokens_30d), `${u.calls_30d || 0} llamadas`],
-    ["Costo equiv. 30d", "US$ " + (u.cost_equiv_30d || 0).toFixed(2), "incluido en tu plan"],
-    ...["1d", "7d", "30d"].map((h) => [`Acierto ${h}`,
-      hr[h]?.hit_rate == null ? "—" : pct(hr[h].hit_rate, false), `n=${hr[h]?.n || 0} · prom ${pct(hr[h]?.avg_ret)}`]),
+  const hr = (a, h) => { const x = a.hit_rates?.[h]; return x?.hit_rate == null ? "—" :
+    `${pct(x.hit_rate, false)} <span class="muted">(n=${x.n}, ${pct(x.avg_ret)})</span>`; };
+  const cls = (v) => v > 0 ? "up" : v < 0 ? "down" : "";
+  const rows = [
+    ["Modelo", (a) => esc(a.model)],
+    ["P&L cartera", (a) => `<span class="${cls(a.sleeve.pnl)}">${money(a.sleeve.pnl, d.base_currency)}</span>
+      <span class="muted">${pct(a.sleeve.pnl_pct)}</span>`],
+    ["Invertido / tope", (a) => `${money(a.sleeve.value, d.base_currency)} / ${money(a.sleeve.cap, d.base_currency)}`],
+    ["Posiciones", (a) => esc(a.sleeve.positions.join(", ") || "—")],
+    ["Acierto 1d", (a) => hr(a, "1d")], ["Acierto 7d", (a) => hr(a, "7d")], ["Acierto 30d", (a) => hr(a, "30d")],
+    ["Tokens hoy", (a) => `${k(a.usage.tokens_today)} <span class="muted">(${a.usage.calls_today} llamada/s)</span>`],
+    ["Tokens 30 días", (a) => `${k(a.usage.tokens_30d)} <span class="muted">(${a.usage.calls_30d} llamadas)</span>`],
+    ["Duración prom.", (a) => a.usage.avg_duration_ms ? (a.usage.avg_duration_ms / 1000).toFixed(0) + " s" : "—"],
   ];
-  $("llm-kpis").innerHTML = cards.map(([a, b, c]) =>
-    `<div class="card kpi"><div class="muted">${a}</div><div class="v">${b}</div><div class="muted">${c}</div></div>`).join("");
-  $("llm-summary").textContent = d.latest ? (d.latest.occurred_at.slice(0, 16).replace("T", " ") + " UTC — " + (d.latest.resumen_mercado || "")) : "Sin análisis todavía.";
+  $("llm-compare").innerHTML = `<tr><th></th>${A.map((a) => `<th>${esc(a.label)}</th>`).join("")}</tr>` +
+    rows.map(([name, f]) => `<tr><td class="muted">${name}</td>${A.map((a) => `<td>${f(a)}</td>`).join("")}</tr>`).join("");
+  $("llm-summaries").innerHTML = A.map((a) => `<pre class="muted"><b>${esc(a.label)}</b> ` + (a.latest ?
+    esc(a.latest.occurred_at.slice(0, 16).replace("T", " ") + " UTC — " + (a.latest.resumen_mercado || "")) :
+    "sin análisis todavía") + "</pre>").join("");
   const o = (x) => x ? `<span class="${x.hit ? "up" : "down"}">${pct(x.ret)}</span>` : '<span class="muted">…</span>';
-  $("llm-journal").innerHTML = "<tr><th>Fecha</th><th>Idea</th><th>Conf.</th><th>Peso</th><th>1d</th><th>7d</th><th>30d</th></tr>" +
-    (d.journal || []).map((r) => `<tr title="${esc(r.reasoning)}"><td>${esc(r.day)}</td>
+  $("llm-journal").innerHTML = "<tr><th>Fecha</th><th>Analista</th><th>Idea</th><th>Conf.</th><th>Peso</th><th>1d</th><th>7d</th><th>30d</th></tr>" +
+    (d.journal || []).map((r) => `<tr title="${esc(r.reasoning)}"><td>${esc(r.day)}</td><td>${esc(r.analyst)}</td>
       <td><b>${esc(r.decision)} ${esc(r.ticker)}</b>${r.planned ? "" : ' <span class="muted">(no ejecutada)</span>'}</td>
       <td>${r.confianza == null ? "—" : r.confianza.toFixed(2)}</td><td>${pct(r.peso, false)}</td>
       <td>${o(r.outcomes["1d"])}</td><td>${o(r.outcomes["7d"])}</td><td>${o(r.outcomes["30d"])}</td></tr>`).join("");

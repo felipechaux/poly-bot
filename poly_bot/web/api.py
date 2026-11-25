@@ -151,8 +151,10 @@ def create_app(bot: "Bot") -> FastAPI:
 
     @app.get("/api/llm")
     async def llm(days: int = 30) -> dict[str, Any]:
-        """Claude usage, latest analysis, decision journal and hit rates."""
+        """Per-analyst usage, latest analysis, hit rates and sleeve P&L, plus the shared journal."""
         from datetime import timedelta
+
+        from poly_bot.strategies.llm_analyst import LLMAnalystStrategy
 
         store = _store()
         since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -162,46 +164,77 @@ def create_app(bot: "Bot") -> FastAPI:
         by_rec: dict[int, dict[int, Any]] = defaultdict(dict)
         for o in outcomes:
             by_rec[o["payload"]["rec_id"]][o["payload"]["horizon_days"]] = o["payload"]
+        txs = await store.all_transactions()
+        snap = bot.tracker.snapshot()
+        total = snap.total_value()
+        today = datetime.now(bot.tz).date().isoformat()
 
         def _sum(evs: list[dict[str, Any]], key: str) -> float:
             return sum(float(e["payload"].get("usage", {}).get(key, 0) or 0) for e in evs)
 
-        today = datetime.now(bot.tz).date().isoformat()
-        todays = [a for a in analyses
-                  if datetime.fromisoformat(a["occurred_at"]).astimezone(bot.tz).date().isoformat() == today]
-        hit_rates: dict[str, Any] = {}
-        for h in (1, 7, 30):
-            scored = [o["payload"] for o in outcomes if o["payload"]["horizon_days"] == h]
-            hit_rates[f"{h}d"] = {
-                "n": len(scored),
-                "hit_rate": (sum(1 for o in scored if o["hit"]) / len(scored)) if scored else None,
-                "avg_ret": (sum(o["ret"] for o in scored) / len(scored)) if scored else None,
-            }
-        latest = analyses[-1] if analyses else None
+        def _hit_rates(outs: list[dict[str, Any]]) -> dict[str, Any]:
+            res: dict[str, Any] = {}
+            for h in (1, 7, 30):
+                scored = [o["payload"] for o in outs if o["payload"]["horizon_days"] == h]
+                res[f"{h}d"] = {
+                    "n": len(scored),
+                    "hit_rate": (sum(1 for o in scored if o["hit"]) / len(scored)) if scored else None,
+                    "avg_ret": (sum(o["ret"] for o in scored) / len(scored)) if scored else None,
+                }
+            return res
+
+        analysts = []
+        for st in bot.strategies:
+            if not isinstance(st, LLMAnalystStrategy):
+                continue
+            mine = [a for a in analyses if a["strategy"] == st.name]
+            todays = [a for a in mine if datetime.fromisoformat(a["occurred_at"])
+                      .astimezone(bot.tz).date().isoformat() == today]
+            latest = mine[-1] if mine else None
+            pos = [p for p in snap.positions if p.strategy == st.name]
+            unrealized = sum(snap.to(p.unrealized_pnl, p.currency) for p in pos)
+            realized = sum(snap.to(t.realized_pnl or 0.0, t.currency) for t in txs
+                           if t.strategy == st.name and t.kind == "SELL")
+            dividends = sum(snap.to(t.gross - t.fee, t.currency) for t in txs
+                            if t.strategy == st.name and t.kind == "DIVIDEND")
+            cap = st.p["sleeve_pct"] * total
+            pnl = unrealized + realized + dividends
+            analysts.append({
+                "name": st.name, "label": st.label, "provider": st.provider, "model": st.p["model"],
+                "usage": {
+                    "calls_today": len(todays),
+                    "tokens_today": _sum(todays, "total_tokens"),
+                    "cost_equiv_today": _sum(todays, "cost_usd_equiv"),
+                    f"calls_{days}d": len(mine),
+                    f"tokens_{days}d": _sum(mine, "total_tokens"),
+                    f"cost_equiv_{days}d": _sum(mine, "cost_usd_equiv"),
+                    "avg_duration_ms": (_sum(mine, "duration_ms") / len(mine)) if mine else None,
+                },
+                "latest": {
+                    "occurred_at": latest["occurred_at"],
+                    "resumen_mercado": latest["payload"].get("resumen_mercado"),
+                    "acciones": latest["payload"].get("acciones", []),
+                    "usage": latest["payload"].get("usage", {}),
+                } if latest else None,
+                "hit_rates": _hit_rates([o for o in outcomes if o["strategy"] == st.name]),
+                "sleeve": {
+                    "cap": cap, "value": sum(snap.value_of(p.ticker) for p in pos),
+                    "positions": [p.ticker for p in pos], "pnl": pnl,
+                    "pnl_pct": pnl / cap if cap else None,
+                },
+            })
+        labels = {a["name"]: a["label"] for a in analysts}
         return {
-            "usage": {
-                "calls_today": len(todays),
-                "tokens_today": _sum(todays, "total_tokens"),
-                "cost_equiv_today": _sum(todays, "cost_usd_equiv"),
-                f"calls_{days}d": len(analyses),
-                f"tokens_{days}d": _sum(analyses, "total_tokens"),
-                f"cost_equiv_{days}d": _sum(analyses, "cost_usd_equiv"),
-                "avg_duration_ms": (_sum(analyses, "duration_ms") / len(analyses)) if analyses else None,
-            },
-            "latest": {
-                "occurred_at": latest["occurred_at"],
-                "resumen_mercado": latest["payload"].get("resumen_mercado"),
-                "acciones": latest["payload"].get("acciones", []),
-                "usage": latest["payload"].get("usage", {}),
-            } if latest else None,
-            "hit_rates": hit_rates,
+            "base_currency": snap.base_currency,
+            "analysts": analysts,
             "journal": [
-                {"id": r["id"], "day": r["occurred_at"][:10], "ticker": r["ticker"],
+                {"id": r["id"], "day": r["occurred_at"][:10], "strategy": r["strategy"],
+                 "analyst": labels.get(r["strategy"], r["strategy"]), "ticker": r["ticker"],
                  "decision": r["decision"], "reasoning": r["reasoning"],
                  "confianza": r["payload"].get("confianza"), "peso": r["payload"].get("peso_objetivo"),
                  "price_at": r["payload"].get("price_at"), "planned": r["payload"].get("planned"),
                  "outcomes": {f"{h}d": by_rec.get(r["id"], {}).get(h) for h in (1, 7, 30)}}
-                for r in reversed(recs[-50:])
+                for r in reversed(recs[-80:])
             ],
         }
 

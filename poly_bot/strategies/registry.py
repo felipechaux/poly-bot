@@ -20,10 +20,11 @@ def load_strategies(strategy_configs: dict[str, Any]) -> list[Strategy]:
     for name, cfg in strategy_configs.items():
         if not isinstance(cfg, dict) or not cfg.get("enabled", False):
             continue
-        cls = STRATEGY_REGISTRY.get(name)
+        kind = str(cfg.get("class", name))  # several instances may share a class
+        cls = STRATEGY_REGISTRY.get(kind)
         if cls is None:
-            raise ValueError(f"Unknown strategy: '{name}'. Available: {list(STRATEGY_REGISTRY)}")
-        strategies.append(cls(cfg))
+            raise ValueError(f"Unknown strategy: '{kind}'. Available: {list(STRATEGY_REGISTRY)}")
+        strategies.append(cls({**cfg, "name": name}))
     # Satellite strategies must not trade the core's tickers
     core_targets: set[str] = set()
     for s in strategies:
@@ -32,4 +33,7 @@ def load_strategies(strategy_configs: dict[str, Any]) -> list[Strategy]:
     for s in strategies:
         if isinstance(s, LLMAnalystStrategy):
             s.excluded |= core_targets
+    names = [s.name for s in strategies]
+    if len(names) != len(set(names)):
+        raise ValueError(f"Duplicate strategy names: {names}")
     return strategies

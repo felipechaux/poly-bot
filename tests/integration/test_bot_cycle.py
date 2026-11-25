@@ -161,9 +161,13 @@ async def test_llm_cycle_journal_scoring_and_api(tmp_path, monkeypatch):
 
     with TestClient(create_app(bot)) as client:
         d = client.get("/api/llm").json()
-    assert d["usage"]["calls_30d"] == 2 and d["usage"]["tokens_30d"] == 2400
-    assert d["hit_rates"]["7d"]["hit_rate"] == 1.0
+    a = d["analysts"][0]
+    assert a["name"] == "llm_analyst" and a["label"] == "Claude"
+    assert a["usage"]["calls_30d"] == 2 and a["usage"]["tokens_30d"] == 2400
+    assert a["hit_rates"]["7d"]["hit_rate"] == 1.0
+    assert a["sleeve"]["positions"] == ["NU"] and a["sleeve"]["pnl"] > 0
     assert d["journal"][-1]["outcomes"]["7d"]["hit"] is True
+    assert d["journal"][-1]["analyst"] == "Claude"
     await bot._shutdown()
 
 
@@ -189,4 +193,41 @@ async def test_missed_today_respects_run_time(tmp_path):
         assert await bot._missed_today()
     with at(2030, 1, 5, 18):  # Saturday
         assert not await bot._missed_today()
+    await bot._shutdown()
+
+
+async def test_two_analysts_compare_side_by_side(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from poly_bot.web.api import create_app
+    from tests.unit.test_llm_analyst import FakeClaude, idea, no_news
+
+    s = settings(tmp_path)
+    s.strategies["core_allocation"]["params"]["portfolio_share"] = 0.85
+    common = {"feeds": [], "sleeve_pct": 0.075, "max_position_pct": 0.04}
+    s.strategies["llm_claude"] = {"class": "llm_analyst", "enabled": True,
+                                  "params": {**common, "provider": "claude"}}
+    s.strategies["llm_gemini"] = {"class": "llm_analyst", "enabled": True,
+                                  "params": {**common, "provider": "agy", "model": "gemini-4-neon-high"}}
+    bot = Bot(s, provider=FakeProvider())
+    claude, gemini = bot.strategies[1], bot.strategies[2]
+    assert (claude.name, gemini.name) == ("llm_claude", "llm_gemini")
+    assert type(gemini.client).__name__ == "AgyCLI"
+    # Both want NU; Claude runs first and gets it, so NU is no longer eligible for Gemini
+    claude.client = FakeClaude({"resumen_mercado": "a", "acciones": [idea("NU", peso=0.04)]})
+    gemini.client = FakeClaude({"resumen_mercado": "b", "acciones": [
+        idea("NU", peso=0.04), idea("ECOPETROL.CL", peso=0.04)]})
+    claude.news_fetcher = gemini.news_fetcher = no_news
+
+    r = await bot.run_cycle(notify=False)
+    owners = {p.ticker: p.strategy for p in bot.tracker.snapshot().positions}
+    assert owners["NU"] == "llm_claude" and owners["ECOPETROL.CL"] == "llm_gemini"
+    assert "Claude" in r.message and "Gemini" in r.message
+    assert "NU" not in gemini.client.last_schema["properties"]["acciones"]["items"]["properties"]["ticker"]["enum"]
+
+    with TestClient(create_app(bot)) as client:
+        d = client.get("/api/llm").json()
+    assert [a["label"] for a in d["analysts"]] == ["Claude", "Gemini"]
+    assert d["analysts"][1]["sleeve"]["positions"] == ["ECOPETROL.CL"]
+    assert {j["analyst"] for j in d["journal"]} == {"Claude", "Gemini"}
     await bot._shutdown()
