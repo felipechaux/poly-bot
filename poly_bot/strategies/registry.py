@@ -6,9 +6,11 @@ from typing import Any
 
 from poly_bot.strategies.base import Strategy
 from poly_bot.strategies.core_allocation import CoreAllocationStrategy
+from poly_bot.strategies.llm_analyst import LLMAnalystStrategy
 
 STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "core_allocation": CoreAllocationStrategy,
+    "llm_analyst": LLMAnalystStrategy,
 }
 
 
@@ -22,4 +24,12 @@ def load_strategies(strategy_configs: dict[str, Any]) -> list[Strategy]:
         if cls is None:
             raise ValueError(f"Unknown strategy: '{name}'. Available: {list(STRATEGY_REGISTRY)}")
         strategies.append(cls(cfg))
+    # Satellite strategies must not trade the core's tickers
+    core_targets: set[str] = set()
+    for s in strategies:
+        if isinstance(s, CoreAllocationStrategy):
+            core_targets |= set(s.targets)
+    for s in strategies:
+        if isinstance(s, LLMAnalystStrategy):
+            s.excluded |= core_targets
     return strategies

@@ -8,7 +8,7 @@ portafolio ficticio en **COP y USD** y manda un **resumen diario al iPhone vía 
 
 ## Cómo funciona (Fase 1)
 
-Un ciclo por día hábil a las **17:00 hora Bogotá** (después del cierre de BVC y NYSE):
+Un ciclo por día hábil a las **8:00 am hora Bogotá** (antes de la apertura; usa los cierres del día anterior):
 
 ```
 yfinance (cierres + dividendos + USD/COP)
@@ -18,8 +18,15 @@ yfinance (cierres + dividendos + USD/COP)
   → snapshot diario en SQLite → resumen ntfy
 ```
 
-- **Estrategia `core_allocation`**: pesos fijos (60% global, 20% Colombia, 10% bonos, 10% oro/cripto),
-  rebalanceo el primer ciclo de cada mes o si un activo se desvía > 5 pp.
+- **Estrategia `core_allocation`** (85% de la cartera): pesos fijos (60% global, 20% Colombia, 10% bonos,
+  10% oro/cripto), rebalanceo el primer ciclo de cada mes o si un activo se desvía > 5 pp.
+- **Estrategia `llm_analyst`** (cartera satélite, máx. 15%): **una** llamada diaria a `claude -p` con tu
+  suscripción (sin API key; el bot elimina `ANTHROPIC_API_KEY` del entorno). Recibe indicadores del
+  universo (sin los tickers de la core), la cartera, su historial de aciertos y ~30 titulares RSS; responde
+  JSON con esquema fijo. Límites duros: confianza ≥ 0.70, ≤ 5% por posición, ≤ 5 posiciones, ≤ 2 entradas
+  nuevas/día, stop-loss −15%. Cada idea queda en una bitácora con su resultado a 1/7/30 días.
+  Consumo medido: ~9k tokens por llamada (~US$ 0,04 equivalente, incluido en el plan), visible en el
+  dashboard y en el resumen diario. El botón de dry run nunca llama a Claude.
 - **Costos simulados**: BVC 0,3% (mín. $10.000 COP) + slippage 0,2%, acciones enteras;
   EE. UU. 0,1% (mín. US$1), fraccionadas; cripto 0,1%; spread FX COP↔USD 0,5%.
 - **Riesgo**: lista blanca (universo), peso máx. por activo / clase / región, precios desactualizados, sin cortos.
@@ -61,6 +68,13 @@ make tunnel-url                   # URL pública HTTPS del dashboard (para el iP
   un túnel con nombre en una zona DNS gestionada por Cloudflare.
 - La Mac debe estar encendida y despierta a las 17:00; si el ciclo se perdió, corre al arrancar.
 - Ejecutar un ciclo real por API exige `ADMIN_TOKEN`; el botón de simulación (dry run) no.
+
+### Token de Claude (servidor)
+
+```bash
+claude setup-token      # en la Mac, abre el navegador; copia el token
+# en el servidor: agrega CLAUDE_CODE_OAUTH_TOKEN=... a ~/invest-bot/.env y reinicia
+```
 
 ### Notificaciones al iPhone (ntfy)
 

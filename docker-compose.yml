@@ -20,7 +20,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 600m
+          memory: 900m             # bot + claude CLI during the daily call
     logging:
       driver: json-file
       options:

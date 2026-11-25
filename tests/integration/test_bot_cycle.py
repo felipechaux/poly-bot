@@ -116,3 +116,77 @@ async def test_missed_today_only_before_first_cycle(tmp_path):
     await bot.run_cycle(notify=False)
     assert not await bot._missed_today()
     await bot._shutdown()
+
+
+async def test_llm_cycle_journal_scoring_and_api(tmp_path, monkeypatch):
+    from datetime import datetime as real_dt
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+
+    import poly_bot.bot as botmod
+    from poly_bot.web.api import create_app
+    from tests.unit.test_llm_analyst import FakeClaude, idea, no_news
+
+    s = settings(tmp_path)
+    s.strategies["core_allocation"]["params"]["portfolio_share"] = 0.85
+    s.strategies["llm_analyst"] = {"enabled": True, "params": {"feeds": [], "max_position_pct": 0.05}}
+    prov = FakeProvider()
+    bot = Bot(s, provider=prov)
+    llm = bot.strategies[1]
+    assert llm.excluded == {"VT", "ICOLCAP.CL", "BTC-USD"}
+    fake = FakeClaude({"resumen_mercado": "mercado mixto", "acciones": [idea("NU", conf=0.8)]})
+    llm.client, llm.news_fetcher = fake, no_news
+
+    r = await bot.run_cycle()
+    assert any(t.ticker == "NU" and t.kind == "BUY" for t in r.executed)
+    assert "Claude" in r.message
+    await bot.run_cycle()  # same day: cached analysis, no second call
+    assert fake.calls == 1
+
+    # 8 days later NU is up 20% → 1d and 7d outcomes are hits
+    prov.prices["NU"] = 12.0
+
+    class D(botmod.datetime):  # type: ignore[misc,valid-type]
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[no-untyped-def,override]
+            return real_dt(2026, 12, 2, 8, 0, tzinfo=tz)
+
+    with patch.object(botmod, "datetime", D):
+        await bot.run_cycle(notify=False)
+    assert fake.calls == 2
+    outcomes = await bot.store.events("outcome")  # type: ignore[union-attr]
+    assert {o["payload"]["horizon_days"] for o in outcomes} == {1, 7}
+    assert all(o["payload"]["hit"] for o in outcomes)
+
+    with TestClient(create_app(bot)) as client:
+        d = client.get("/api/llm").json()
+    assert d["usage"]["calls_30d"] == 2 and d["usage"]["tokens_30d"] == 2400
+    assert d["hit_rates"]["7d"]["hit_rate"] == 1.0
+    assert d["journal"][-1]["outcomes"]["7d"]["hit"] is True
+    await bot._shutdown()
+
+
+async def test_missed_today_respects_run_time(tmp_path):
+    from datetime import datetime as real_dt
+    from unittest.mock import patch
+
+    import poly_bot.bot as botmod
+
+    bot = Bot(settings(tmp_path), provider=FakeProvider())  # daily_run_time 17:00
+    await bot.run_cycle(notify=False)  # creates today's snapshot (2026-11-24 real date)
+
+    def at(y, m, d, hh):
+        class D(botmod.datetime):  # type: ignore[misc,valid-type]
+            @classmethod
+            def now(cls, tz=None):  # type: ignore[no-untyped-def,override]
+                return real_dt(y, m, d, hh, 0, tzinfo=tz)
+        return patch.object(botmod, "datetime", D)
+
+    with at(2030, 1, 2, 6):   # Wednesday 06:00, before run time
+        assert not await bot._missed_today()
+    with at(2030, 1, 2, 18):  # after run time, no snapshot that day
+        assert await bot._missed_today()
+    with at(2030, 1, 5, 18):  # Saturday
+        assert not await bot._missed_today()
+    await bot._shutdown()

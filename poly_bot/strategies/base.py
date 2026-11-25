@@ -37,7 +37,10 @@ class DailyContext:
     portfolio: PortfolioSnapshot
     universe: Universe
     last_signal_date: date | None = None  # last cycle this strategy emitted signals
-    extra: dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)  # dry_run, cached_analysis, track_record…
+    # Outputs besides signals (persisted / shown by the bot):
+    events: list[dict[str, Any]] = field(default_factory=list)  # → agent_events
+    notes: list[str] = field(default_factory=list)  # → daily summary lines
 
 
 class Strategy(ABC):

@@ -83,6 +83,13 @@
   </section>
 
   <section class="card">
+    <h2>Analista Claude</h2>
+    <div class="grid" id="llm-kpis" style="margin-bottom:12px"></div>
+    <pre id="llm-summary" class="muted">—</pre>
+    <div class="table-wrap" style="margin-top:10px"><table id="llm-journal"></table></div>
+  </section>
+
+  <section class="card">
     <h2>Último resumen</h2>
     <pre id="summary">—</pre>
     <div class="controls" style="margin-top:10px">
@@ -192,6 +199,27 @@ function equity(snaps) {
   $("equity-note").textContent = "Benchmarks = mismo capital inicial invertido 100% en cada uno (en COP).";
 }
 
+function llm(d) {
+  const u = d.usage || {}, hr = d.hit_rates || {};
+  const k = (v) => v >= 1000 ? (v / 1000).toFixed(1) + "k" : String(Math.round(v || 0));
+  const cards = [
+    ["Tokens hoy", k(u.tokens_today), `${u.calls_today || 0} llamada(s)`],
+    ["Tokens 30 días", k(u.tokens_30d), `${u.calls_30d || 0} llamadas`],
+    ["Costo equiv. 30d", "US$ " + (u.cost_equiv_30d || 0).toFixed(2), "incluido en tu plan"],
+    ...["1d", "7d", "30d"].map((h) => [`Acierto ${h}`,
+      hr[h]?.hit_rate == null ? "—" : pct(hr[h].hit_rate, false), `n=${hr[h]?.n || 0} · prom ${pct(hr[h]?.avg_ret)}`]),
+  ];
+  $("llm-kpis").innerHTML = cards.map(([a, b, c]) =>
+    `<div class="card kpi"><div class="muted">${a}</div><div class="v">${b}</div><div class="muted">${c}</div></div>`).join("");
+  $("llm-summary").textContent = d.latest ? (d.latest.occurred_at.slice(0, 16).replace("T", " ") + " UTC — " + (d.latest.resumen_mercado || "")) : "Sin análisis todavía.";
+  const o = (x) => x ? `<span class="${x.hit ? "up" : "down"}">${pct(x.ret)}</span>` : '<span class="muted">…</span>';
+  $("llm-journal").innerHTML = "<tr><th>Fecha</th><th>Idea</th><th>Conf.</th><th>Peso</th><th>1d</th><th>7d</th><th>30d</th></tr>" +
+    (d.journal || []).map((r) => `<tr title="${esc(r.reasoning)}"><td>${esc(r.day)}</td>
+      <td><b>${esc(r.decision)} ${esc(r.ticker)}</b>${r.planned ? "" : ' <span class="muted">(no ejecutada)</span>'}</td>
+      <td>${r.confianza == null ? "—" : r.confianza.toFixed(2)}</td><td>${pct(r.peso, false)}</td>
+      <td>${o(r.outcomes["1d"])}</td><td>${o(r.outcomes["7d"])}</td><td>${o(r.outcomes["30d"])}</td></tr>`).join("");
+}
+
 async function refresh() {
   try {
     const [s, p, pos, u, eq, t] = await Promise.all([get("/api/status"), get("/api/portfolio"),
@@ -205,6 +233,7 @@ async function refresh() {
     kpis(p, s); alloc("alloc-class", p.allocation?.asset_class); alloc("alloc-region", p.allocation?.region);
     alloc("alloc-currency", p.allocation?.currency); positions(pos.positions); renderUniverse();
     equity(eq.snapshots); txs(t.transactions);
+    get("/api/llm").then(llm).catch(() => {});
   } catch (e) { console.error(e); }
 }
 
