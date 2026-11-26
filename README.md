@@ -36,9 +36,21 @@ yfinance (cierres + dividendos + USD/COP)
     nunca llama a ningún modelo.
 - **Ejecución a la apertura**: a las 8:00 se decide y las órdenes de BVC y EE. UU. quedan pendientes;
   a las 16:30 se ejecutan al **precio de apertura** de la primera sesión posterior a la decisión (nunca
-  a una apertura ya conocida) y llega un push con lo ejecutado. Cripto (24/7) se ejecuta al momento.
-  Una nueva decisión reemplaza las órdenes pendientes de esa estrategia; sin apertura en 3 días
-  hábiles, la orden vence. `execution.fill: close` vuelve al modo anterior (todo al último cierre).
+  a una apertura ya conocida) y llega un push con lo ejecutado, o «sin órdenes» si no hubo nada, para
+  que un día tranquilo no se confunda con un bot caído. Cripto (24/7) se ejecuta al momento.
+  Una nueva decisión reemplaza las órdenes pendientes de esa estrategia que aún no llegaron a su
+  apertura; sin apertura en 3 días hábiles, la orden vence. `execution.fill: close` vuelve al modo
+  anterior (todo al último cierre).
+- **Escaneos Londres / Nueva York** (`schedule.scans`): a las 08:00 de Londres (≈ 03:00 Bogotá) y a las
+  10:00 de Nueva York (solape Londres–NY) solo los analistas vuelven a mirar precios y noticias. Cripto
+  se ejecuta en el momento; BVC/EE. UU. quedan para la próxima apertura. Un escaneo solo agrega ideas
+  (nunca cancela las órdenes de la mañana) y el tope de entradas nuevas por día cuenta para todas las
+  corridas. Solo hay push si deciden algo. Cada escaneo cuesta 1 llamada a Claude + 1 a Gemini.
+- **Binance Spot Testnet** (`execution.binance_testnet`): con llaves del testnet en `.env`, las órdenes
+  cripto se envían como órdenes market reales a testnet.binance.vision (dinero falso) y se registran
+  con el precio, la cantidad y la comisión que devuelve Binance. Si el testnet falla o su precio se
+  aleja más de 2% del mercado real, esa orden se simula como antes y el resumen lo avisa.
+  `poly-bot binance` revisa las llaves, los precios y los saldos.
 - **Semáforo por analista**: cada idea se compara con una canasta equiponderada de los activos que
   pudo escoger, en la misma ventana (exceso = retorno de la idea − canasta). Gris con < 20 ideas a 7
   días; verde o rojo solo con t ≥ 2 a favor o en contra; amarillo en otro caso.

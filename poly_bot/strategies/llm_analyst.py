@@ -114,7 +114,9 @@ class LLMAnalystStrategy(Strategy):
         headlines = await self.news_fetcher(self.feeds, max_items=self.news_max_items,
                                             max_age_hours=self.news_max_age_hours) if self.feeds else []
         prompt = build_prompt(ctx.today, ctx.portfolio, ctx.quotes, ctx.universe, eligible, sleeve,
-                              headlines, self.p, track_record=str(ctx.extra.get("track_record", "")))
+                              headlines, self.p, track_record=str(ctx.extra.get("track_record", "")),
+                              session=str(ctx.extra.get("session", "")),
+                              new_today=int(ctx.extra.get("new_today", 0)))
         schema = build_schema(eligible, self.p["max_position_pct"])
         try:
             result: ClaudeResult = await self.client.run(prompt, schema, SYSTEM_PROMPT)
@@ -126,7 +128,8 @@ class LLMAnalystStrategy(Strategy):
             return None
 
         analysis = {**result.output, "usage": result.usage.as_dict(), "provider": self.provider,
-                    "prompt_chars": len(prompt), "headlines": len(headlines)}
+                    "prompt_chars": len(prompt), "headlines": len(headlines),
+                    "slot": str(ctx.extra.get("slot", "decide"))}
         ctx.events.append({"event_type": "analysis", "strategy": self.name,
                            "reasoning": str(result.output.get("resumen_mercado", ""))[:1000],
                            "payload": analysis})
@@ -143,7 +146,8 @@ class LLMAnalystStrategy(Strategy):
         sleeve_value = sum(snap.value_of(t) for t in held)
         sleeve_cap = self.p["sleeve_pct"] * total
         n_positions = len(held)
-        new_today = 0
+        new_today = int(ctx.extra.get("new_today", 0))  # entries already made today (decide/scans)
+        locked: set[str] = set(ctx.extra.get("locked") or ())  # orders already at their open
         cached = bool(ctx.extra.get("cached_analysis"))
         guard = ctx.extra.get("guard")  # paused: exits only, no new buys
 
@@ -158,7 +162,7 @@ class LLMAnalystStrategy(Strategy):
             conf = float(idea.get("confianza", 0))
             weight = min(float(idea.get("peso_objetivo", 0)), self.p["max_position_pct"])
             quote = ctx.quotes.get(t)
-            if action == "HOLD" or t not in eligible or quote is None:
+            if action == "HOLD" or t not in eligible or quote is None or t in locked:
                 continue
             why = f"Claude {conf:.2f}: {str(idea.get('razon', ''))}"[:300]
             planned: Signal | None = None
@@ -201,8 +205,9 @@ class LLMAnalystStrategy(Strategy):
             ctx.notes.append(f"⛔ {self.label} en pausa (solo ventas): {guard}")
         if not cached:
             tokens = int(usage.get("total_tokens", 0))
+            session = str(ctx.extra.get("session", ""))
             ctx.notes.append(
-                f"🤖 {self.label} ({usage.get('model') or self.p['model']}): {len(ideas)} ideas, "
+                (f"[{session}] " if session else "") + f"🤖 {self.label} ({usage.get('model') or self.p['model']}): {len(ideas)} ideas, "
                 f"{n_exec} a ejecutar · {tokens / 1000:.1f}k tokens"
                 + (f" (~US$ {cost:.3f} equiv., incluido en tu plan)"
                    if (cost := float(usage.get('cost_usd_equiv', 0) or 0)) else " (incluido en tu plan)"))

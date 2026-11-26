@@ -17,6 +17,12 @@ schedule:
   daily_run_time: "08:00"       # decide antes de la apertura (NYSE y BVC 9:30 Bogotá; NYSE 8:30 en horario de verano EE. UU.)
   run_on_start: true            # al arrancar, corre el ciclo si hoy aún no se ha corrido
   weekdays_only: true
+  # Escaneos intradía: solo los analistas LLM vuelven a mirar precios + noticias.
+  # Cripto se ejecuta en el momento; BVC/EE. UU. quedan para la próxima apertura.
+  # Solo hay push si deciden algo. Cada escaneo = 1 llamada a Claude + 1 a Gemini (tu plan).
+  scans:
+    - {name: londres, label: "Apertura Londres", at: "08:00", tz: Europe/London}      # ≈ 03:00 Bogotá
+    - {name: londres_ny, label: "Solape Londres–NY", at: "10:00", tz: America/New_York} # 30 min tras abrir NY
 
 # --- Ejecución simulada ---
 execution:
@@ -24,6 +30,9 @@ execution:
                                 #            (cripto, 24/7, al precio actual) · close: todo al último cierre
   settle_time: "16:30"          # después del cierre: ejecuta las órdenes pendientes y envía un push
   pending_max_days: 3           # días hábiles sin apertura disponible (p. ej. festivo) antes de vencer
+  binance_testnet:              # cripto se envía como orden market real al Spot Testnet (dinero falso)
+    enabled: true               # requiere BINANCE_TESTNET_API_KEY/SECRET en .env; sin llaves → simulado
+    max_deviation_pct: 0.02     # si el precio del testnet se aleja >2% del mercado real → simulado
 
 # --- Datos de mercado ---
 market_data:

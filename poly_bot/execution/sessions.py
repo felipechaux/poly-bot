@@ -8,7 +8,7 @@ an opening price that was already known. Crypto trades 24/7 and fills immediatel
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -37,4 +37,17 @@ def next_open_fill(market: str, decided_at: datetime, opens: pd.Series | None) -
         day = pd.Timestamp(idx).date()
         if session_open(market, day) > decided_at and price and price > 0:
             return day, float(price)
+    return None
+
+
+def next_session_open(market: str, after: datetime) -> datetime | None:
+    """First regular-session open strictly after `after` (weekdays; holidays not modelled)."""
+    if not fills_at_open(market):
+        return None
+    tz, _ = SESSION_OPEN[market]
+    day = after.astimezone(ZoneInfo(tz)).date()
+    for _ in range(8):
+        if day.weekday() < 5 and (opened := session_open(market, day)) > after:
+            return opened
+        day += timedelta(days=1)
     return None

@@ -48,6 +48,11 @@ class Settings(BaseSettings):
 
     dashboard_url: str = Field(default="", validation_alias="DASHBOARD_URL")
 
+    # Binance Spot Testnet (fake money). Empty = crypto stays fully simulated.
+    binance_testnet_api_key: str = Field(default="", validation_alias="BINANCE_TESTNET_API_KEY")
+    binance_testnet_api_secret: str = Field(default="",
+                                            validation_alias="BINANCE_TESTNET_API_SECRET")
+
     log_format: Literal["console", "json"] = Field(default="console", validation_alias="LOG_FORMAT")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
 
