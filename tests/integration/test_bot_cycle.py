@@ -69,14 +69,16 @@ async def test_dividend_credited_once_with_withholding(tmp_path):
     usd_before = bot.tracker.cash["USD"]
 
     # Next day: VT pays a dividend dated after the position was opened
-    prov.dividends = {"VT": [Dividend(ticker="VT", ex_date=date(2026, 11, 25), amount_per_share=1.0, currency="USD")]}
+    from datetime import timedelta
+    ex = date.today() + timedelta(days=1)  # relative: the position was opened today (real clock)
+    prov.dividends = {"VT": [Dividend(ticker="VT", ex_date=ex, amount_per_share=1.0, currency="USD")]}
     from unittest.mock import patch
     import poly_bot.bot as botmod
 
     class D(botmod.datetime):  # type: ignore[misc,valid-type]
         @classmethod
         def now(cls, tz=None):  # type: ignore[no-untyped-def,override]
-            return botmod.datetime(2026, 11, 25, 17, 0, tzinfo=tz)
+            return botmod.datetime(ex.year, ex.month, ex.day, 17, 0, tzinfo=tz)
 
     with patch.object(botmod, "datetime", D):
         await bot.run_cycle()

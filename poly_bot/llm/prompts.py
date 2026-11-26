@@ -12,8 +12,8 @@ from poly_bot.portfolio.models import PortfolioSnapshot
 
 SYSTEM_PROMPT = """\
 Eres el analista de un bot de inversión SIMULADA (paper trading, dinero ficticio) de un \
-inversionista colombiano. Cada mañana, antes de la apertura, revisas datos de mercado y \
-titulares y propones como máximo unas pocas operaciones para una cartera satélite pequeña.
+inversionista colombiano. Cada mañana antes de la apertura, y en escaneos intradía (apertura \
+de Londres, solape Londres–Nueva York), revisas datos de mercado y titulares y propones como máximo unas pocas operaciones para una cartera satélite pequeña.
 
 Reglas:
 - Responde SOLO con el JSON del esquema. Escribe en español, conciso y concreto.
@@ -73,9 +73,14 @@ def build_prompt(
     headlines: list[Headline],
     params: dict[str, Any],
     track_record: str = "",
+    session: str = "",
+    new_today: int = 0,
 ) -> str:
     total = snap.total_value()
-    lines = [f"Fecha: {today.isoformat()} (precios = último cierre disponible). TRM USD/COP: {snap.usdcop:,.2f}",
+    when = (f"Fecha: {today.isoformat()} · escaneo intradía «{session}» (precios = último dato, "
+            "intradía con ~15 min de retraso; cripto se ejecuta ya, BVC/EE. UU. en la próxima apertura)"
+            if session else f"Fecha: {today.isoformat()} (precios = último cierre disponible)")
+    lines = [f"{when}. TRM USD/COP: {snap.usdcop:,.2f}",
              f"Valor total: {total:,.0f} COP ({snap.total_value('USD'):,.0f} USD). "
              f"Caja: {snap.cash.get('COP', 0):,.0f} COP + {snap.cash.get('USD', 0):,.2f} USD."]
 
@@ -83,7 +88,8 @@ def build_prompt(
     lines.append(
         f"- Máximo {params['sleeve_pct']:.0%} del total en la satélite; máximo "
         f"{params['max_position_pct']:.0%} por activo; máximo {params['max_positions']} posiciones; "
-        f"máximo {params['max_new_per_day']} entradas nuevas hoy.")
+        f"máximo {params['max_new_per_day']} entradas nuevas hoy"
+        + (f" (ya usaste {new_today})" if new_today else "") + ".")
     lines.append(f"- Solo se ejecutan ideas con confianza >= {params['min_confidence']:.2f}.")
 
     lines.append("\n## Posiciones satélite actuales")

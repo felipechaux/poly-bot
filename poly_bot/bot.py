@@ -6,7 +6,13 @@ Decide (08:00, before the open):
   → risk → BVC/US orders queued as pending (crypto fills now) → snapshot → ntfy summary
 Settle (16:30, after the close):
   pending orders fill at the opening price of the first session after the decision
-  → snapshot → short ntfy push with the fills
+  → snapshot → short ntfy push (with the fills, or "sin órdenes" so the day always closes)
+Scans (`schedule.scans`, e.g. London open and the London–NY overlap):
+  only the LLM analysts re-run with fresh prices + news → crypto fills now, BVC/US queue for the
+  next open → push only when something was decided. No snapshot (the 08:00 decide stays the
+  day's main cycle).
+
+Crypto fills can be mirrored on Binance Spot Testnet (`execution.binance_testnet`).
 
 `execution.fill: close` restores the old behaviour (fill everything at the last close).
 
@@ -29,9 +35,10 @@ from poly_bot.analytics.scorecard import (
     sleeve_stats,
 )
 from poly_bot.config.settings import Settings
+from poly_bot.execution.binance_testnet import BinanceError, BinanceTestnet
 from poly_bot.execution.models import OrderRequest, Transaction
 from poly_bot.execution.paper_executor import PaperExecutor
-from poly_bot.execution.sessions import fills_at_open, next_open_fill
+from poly_bot.execution.sessions import fills_at_open, next_open_fill, next_session_open
 from poly_bot.market_data.provider import MarketData, PriceProvider, YFinanceProvider
 from poly_bot.market_data.universe import Universe
 from poly_bot.notify.ntfy import NtfyNotifier
@@ -53,6 +60,22 @@ FX_MIN_USD = 10.0  # don't bother converting less than this
 SCORE_HORIZONS = (1, 7, 30)  # days after a recommendation to score it
 
 
+@dataclass(frozen=True)
+class Scan:
+    """An extra intraday analyst run, scheduled in its own market's timezone."""
+
+    name: str
+    label: str
+    at: str  # "HH:MM" in `tz`
+    tz: str
+
+    @classmethod
+    def parse(cls, raw: list[dict[str, Any]] | None) -> list["Scan"]:
+        return [cls(name=str(r["name"]), label=str(r.get("label") or r["name"]),
+                    at=str(r["at"]), tz=str(r.get("tz", "America/Bogota")))
+                for r in raw or [] if r.get("enabled", True)]
+
+
 @dataclass
 class CycleResult:
     day: date
@@ -60,6 +83,7 @@ class CycleResult:
     executed: list[Transaction] = field(default_factory=list)
     rejected: list[tuple[Signal, str]] = field(default_factory=list)
     pending: list[dict[str, Any]] = field(default_factory=list)  # queued for the next open
+    notes: list[str] = field(default_factory=list)  # execution warnings for the summary
     title: str = ""
     message: str = ""
     notified: bool = False
@@ -81,6 +105,17 @@ class Bot:
         self.fill_mode: str = str(ex.get("fill", "close"))  # close | next_open
         self.settle_time: str = str(ex.get("settle_time", "16:30"))
         self.pending_max_days = int(ex.get("pending_max_days", 3))
+        self.scans: list[Scan] = Scan.parse(settings.schedule.get("scans"))
+        bn = ex.get("binance_testnet") or {}
+        self.binance: BinanceTestnet | None = None
+        has_keys = bool(settings.binance_testnet_api_key and settings.binance_testnet_api_secret)
+        # off: disabled in config · no_keys: enabled but .env lacks keys · on: mirroring
+        self.binance_state = "off" if not bn.get("enabled") else "on" if has_keys else "no_keys"
+        if self.binance_state == "on":
+            self.binance = BinanceTestnet(
+                settings.binance_testnet_api_key, settings.binance_testnet_api_secret,
+                base_url=str(bn.get("base_url", "https://testnet.binance.vision")),
+                max_deviation_pct=float(bn.get("max_deviation_pct", 0.02)))
         self.risk = RiskManager.from_config(self.universe, settings.risk, md_cfg)
         self.tracker = PositionTracker(base_currency=settings.base_currency)
         self.strategies: list[Strategy] = load_strategies(settings.strategies)
@@ -140,7 +175,8 @@ class Bot:
         await self.start()
         self._running = True
         log.info("bot.started", strategies=[s.name for s in self.strategies],
-                 universe=len(self.universe), notify=self.notifier.enabled)
+                 universe=len(self.universe), notify=self.notifier.enabled,
+                 scans=[sc.name for sc in self.scans], binance_testnet=self.binance is not None)
         try:
             assert self.store is not None
             if await self.store.pending_orders():
@@ -155,7 +191,9 @@ class Bot:
                     await asyncio.sleep(max(0.5, min(remaining, 30.0)))
                 if self._running:
                     if self.next_job == "settle":
-                        await self._safe_settle()
+                        await self._safe_settle(scheduled=True)
+                    elif self.next_job.startswith("scan:"):
+                        await self._safe_scan(self.next_job.removeprefix("scan:"))
                     else:
                         await self._safe_cycle()
         finally:
@@ -167,21 +205,26 @@ class Bot:
     async def _shutdown(self) -> None:
         for s in self.strategies:
             await s.on_stop()
+        if self.binance is not None:
+            await self.binance.close()
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
             self.store = None
         log.info("bot.stopped")
 
-    def _next_at(self, now: datetime, hhmm: str) -> datetime:
+    def _next_at(self, now: datetime, hhmm: str, tz: ZoneInfo | None = None) -> datetime:
+        """Next weekday HH:MM in `tz` (default: the bot's), returned in the bot's timezone."""
+        tz = tz or self.tz
         hh, mm = (int(x) for x in hhmm.split(":"))
         weekdays_only = self._settings.schedule.get("weekdays_only", True)
-        candidate = datetime.combine(now.date(), time(hh, mm), tzinfo=self.tz)
-        if candidate <= now:
-            candidate += timedelta(days=1)
-        while weekdays_only and candidate.weekday() >= 5:
-            candidate += timedelta(days=1)
-        return candidate
+        local = now.astimezone(tz)
+        day = local.date()
+        while True:
+            candidate = datetime.combine(day, time(hh, mm), tzinfo=tz)
+            if candidate > local and not (weekdays_only and candidate.weekday() >= 5):
+                return candidate.astimezone(self.tz)
+            day += timedelta(days=1)
 
     def _next_run_time(self, now: datetime) -> datetime:
         return self._next_at(now, str(self._settings.schedule.get("daily_run_time", "17:00")))
@@ -190,8 +233,9 @@ class Bot:
         decide = self._next_run_time(now)
         if self.fill_mode != "next_open":
             return decide, "decide"
-        settle = self._next_at(now, self.settle_time)
-        return (settle, "settle") if settle < decide else (decide, "decide")
+        jobs = [(decide, "decide"), (self._next_at(now, self.settle_time), "settle")]
+        jobs += [(self._next_at(now, sc.at, ZoneInfo(sc.tz)), f"scan:{sc.name}") for sc in self.scans]
+        return min(jobs, key=lambda j: j[0])
 
     async def _missed_today(self) -> bool:
         """True if today's scheduled time has passed and the cycle hasn't run yet.
@@ -210,9 +254,22 @@ class Bot:
             return False
         return now.time() >= time(hh, mm)
 
-    async def _safe_settle(self) -> None:
+    async def _safe_scan(self, name: str) -> None:
+        scan = next((sc for sc in self.scans if sc.name == name), None)
+        if scan is None:
+            return
         try:
-            await self.settle()
+            await self.run_cycle(scan=scan)
+        except Exception as exc:
+            log.exception("bot.scan_failed", scan=name, error=str(exc))
+            if self.store:
+                await self.store.save_event("error", reasoning=f"scan {name}: {exc}")
+            await self.notifier.send(f"El escaneo «{scan.label}» falló: {exc}",
+                                     title="⚠️ Invest bot: error", tags=["warning"], priority=3)
+
+    async def _safe_settle(self, scheduled: bool = False) -> None:
+        try:
+            await self.settle(scheduled=scheduled)
         except Exception as exc:
             log.exception("bot.settle_failed", error=str(exc))
             if self.store:
@@ -237,13 +294,16 @@ class Bot:
     def snapshot(self) -> PortfolioSnapshot | None:
         return self.tracker.snapshot() if self.tracker.usdcop else None
 
-    async def run_cycle(self, dry_run: bool = False, notify: bool = True) -> CycleResult:
+    async def run_cycle(self, dry_run: bool = False, notify: bool = True,
+                        scan: Scan | None = None) -> CycleResult:
+        """The 08:00 decide cycle, or (with `scan`) an intraday analysts-only scan."""
         await self.start()
         assert self.store is not None
         async with self._cycle_lock:
             today = datetime.now(self.tz).date()
             cycle_start = datetime.now(timezone.utc)
             result = CycleResult(day=today, dry_run=dry_run)
+            slot = f"scan:{scan.name}" if scan else "decide"
 
             md = await self._provider.fetch(list(self.universe))
             self.last_market = md
@@ -251,24 +311,33 @@ class Bot:
             tracker.update_prices(md.quotes, md.usdcop)
             if not dry_run:
                 await self.store.save_quotes(md.quotes)
+            if not dry_run and scan is None:
                 await self._credit_dividends(tracker, md, today, result)
-
-            if not dry_run:
                 await self._settle_pending(md, tracker, today, result)
                 await self._score_recommendations(md, today)
 
+            strategies = [st for st in self.strategies
+                          if scan is None or isinstance(st, LLMAnalystStrategy)]
             strategy_notes: list[str] = []
-            for strategy in self.strategies:
+            for strategy in strategies:
                 last = await self.store.last_event_time(strategy.name, "signals")
+                # Scans only add ideas: every queued order stays (the analyst doesn't see them, so a
+                # scan must not cancel the morning's decision); decide re-runs replace the orders
+                # that haven't reached their open yet.
+                locked = await self._locked_pending(strategy.name, all_pending=scan is not None)
                 ctx = DailyContext(
                     today=today, quotes=md.quotes, usdcop=md.usdcop,
                     portfolio=tracker.snapshot(), universe=self.universe,
                     last_signal_date=last.astimezone(self.tz).date() if last else None,
                     extra={
                         "dry_run": dry_run,
-                        "cached_analysis": await self._todays_event(strategy.name, "analysis", today),
+                        "slot": slot,
+                        "session": scan.label if scan else "",
+                        "cached_analysis": await self._todays_analysis(strategy.name, today, slot),
                         "track_record": await self._track_record(strategy.name),
                         "guard": await self._guard(strategy, tracker),
+                        "new_today": self._new_today(strategy.name, tracker, today, locked),
+                        "locked": {o["ticker"] for o in locked},
                     },
                 )
                 signals = await strategy.on_daily(ctx)
@@ -276,8 +345,9 @@ class Bot:
                 if not dry_run:
                     for ev in ctx.events:
                         await self.store.save_event(**ev)
-                    if self.fill_mode == "next_open":
-                        await self.store.supersede_pending(strategy.name)
+                    if self.fill_mode == "next_open" and scan is None:
+                        await self.store.supersede_pending(strategy.name,
+                                                           keep={o["id"] for o in locked})
                 if not signals:
                     continue
                 log.info("bot.signals", strategy=strategy.name, count=len(signals))
@@ -290,6 +360,9 @@ class Bot:
                 await self._execute(strategy.name, signals, tracker, md, today, result, dry_run)
 
             snap = tracker.snapshot()
+            if scan is not None:
+                return await self._finish_scan(scan, result, snap, strategy_notes + result.notes,
+                                               notify, dry_run)
             benchmarks = {a.ticker: md.quotes[a.ticker].price
                           for a in self.universe.benchmarks if a.ticker in md.quotes}
             if not dry_run:
@@ -300,7 +373,7 @@ class Bot:
                 await self.store.transactions_since(cycle_start)
             notes = [f"⛔ Rechazadas {len(result.rejected)}: " + "; ".join(
                 f"{s.ticker}: {r}" for s, r in result.rejected[:3])] if result.rejected else []
-            notes = strategy_notes + notes + self._pending_notes(result.pending)
+            notes = strategy_notes + result.notes + notes + self._pending_notes(result.pending)
             if dry_run:
                 notes.insert(0, "🧪 DRY RUN — nada se ejecutó")
             inp = SummaryInput(
@@ -323,18 +396,83 @@ class Bot:
                      dry_run=dry_run)
             return result
 
+    async def _finish_scan(self, scan: Scan, result: CycleResult, snap: PortfolioSnapshot,
+                           notes: list[str], notify: bool, dry_run: bool) -> CycleResult:
+        """Scans push only when they decided something (or an analyst failed)."""
+        assert self.store is not None
+        trades = [t for t in result.executed if t.kind != "FX"]
+        lines = [f"• {'Compra' if t.kind == 'BUY' else 'Venta'} {t.ticker} {t.quantity:g} @ "
+                 f"{t.price:,.2f} = {fmt_money(t.gross, t.currency)} · {t.strategy}" for t in trades]
+        if result.rejected:
+            lines.append(f"⛔ Rechazadas {len(result.rejected)}: " + "; ".join(
+                f"{sg.ticker}: {r}" for sg, r in result.rejected[:3]))
+        lines += self._pending_notes(result.pending)
+        failed = [n for n in notes if n.startswith("⚠️")]
+        lines += failed
+        worth = bool(trades or result.pending or result.rejected or failed)
+        result.title = (f"🌍 {scan.label}: {len(trades)} ejecutadas, {len(result.pending)} para "
+                        f"la apertura" if worth else f"🌍 {scan.label}: sin cambios")
+        lines += [n for n in notes if not n.startswith("⚠️")][:6]
+        lines.append(f"💼 Cartera: {fmt_money(snap.total_value(), 'COP')}")
+        lines.append("— Simulado (paper). No es asesoría financiera.")
+        result.message = "\n".join(lines)
+        if notify and not dry_run and worth:
+            result.notified = await self.notifier.send(result.message, title=result.title,
+                                                       tags=["globe_with_meridians"], priority=2)
+        if not dry_run:
+            await self.store.save_event("scan", strategy="", reasoning=scan.name, payload={
+                "scan": scan.name, "executed": len(trades), "pending": len(result.pending),
+                "rejected": len(result.rejected), "notified": result.notified})
+        log.info("bot.scan_done", scan=scan.name, executed=len(trades),
+                 pending=len(result.pending), rejected=len(result.rejected), dry_run=dry_run)
+        return result
+
+    async def _locked_pending(self, strategy: str, all_pending: bool = False) -> list[dict[str, Any]]:
+        """Pending orders a new decision must neither cancel nor duplicate: those whose opening
+        session already started (they fill at that open), or all of them (`all_pending`)."""
+        assert self.store is not None
+        now = datetime.now(timezone.utc)
+        out = []
+        for o in await self.store.pending_orders():
+            asset = self.universe.get(o["ticker"])
+            if o["strategy"] != strategy or asset is None:
+                continue
+            if all_pending:
+                out.append(o)
+                continue
+            opened = next_session_open(asset.market, datetime.fromisoformat(o["decided_at"]))
+            if opened is not None and opened <= now:
+                out.append(o)
+        return out
+
+    def _new_today(self, strategy: str, tracker: PositionTracker, today: date,
+                   kept: list[dict[str, Any]]) -> int:
+        """New positions this strategy already opened today, plus queued new entries that this
+        run keeps — so the daily entry cap holds across the decide cycle and the scans."""
+        positions = [p for p in tracker.snapshot().positions if p.strategy == strategy]
+        held = {p.ticker for p in positions}
+        opened = {p.ticker for p in positions if p.opened_at.astimezone(self.tz).date() == today}
+        queued = {o["ticker"] for o in kept if o["side"] == "BUY" and o["ticker"] not in held
+                  and datetime.fromisoformat(o["decided_at"]).astimezone(self.tz).date() == today}
+        return len(opened | queued)
+
     # ------------------------------------------------------------------
     # Pending orders → fills at the next open
     # ------------------------------------------------------------------
 
-    async def settle(self, notify: bool = True) -> CycleResult:
-        """After-close job: fill pending orders at their session's opening price."""
+    async def settle(self, notify: bool = True, scheduled: bool = False) -> CycleResult:
+        """After-close job: fill pending orders at their session's opening price.
+
+        `scheduled` (the 16:30 job) always pushes, even with nothing to fill, so a quiet day is
+        distinguishable from a dead bot."""
         await self.start()
         assert self.store is not None
         async with self._cycle_lock:
             today = datetime.now(self.tz).date()
             result = CycleResult(day=today, dry_run=False)
             if not await self.store.pending_orders():
+                if scheduled:
+                    await self._settle_quiet(result, notify, waiting=0)
                 return result
             md = await self._provider.fetch(list(self.universe))
             self.last_market = md
@@ -353,6 +491,9 @@ class Bot:
                 await self.store.save_event("settle", payload={
                     "executed": len(result.executed), "rejected": len(result.rejected),
                     "notified": result.notified})
+            elif scheduled:
+                await self._settle_quiet(result, notify,
+                                         waiting=len(await self.store.pending_orders()))
             log.info("bot.settle_done", executed=len(result.executed), rejected=len(result.rejected))
             return result
 
@@ -397,6 +538,24 @@ class Bot:
                 else:
                     await self.store.close_pending(o["id"], "rejected", reason, fill_day=fill_day)
 
+    async def _settle_quiet(self, result: CycleResult, notify: bool, waiting: int) -> None:
+        assert self.store is not None
+        snap = self.snapshot()
+        lines = [f"⏳ {waiting} órdenes siguen esperando una apertura con precio." if waiting
+                 else "No había órdenes pendientes: los analistas mantuvieron (HOLD) y la core no "
+                      "rebalanceó."]
+        if snap is not None:
+            lines.append(f"💼 Cartera: {fmt_money(snap.total_value(), 'COP')}")
+        lines.append("— Simulado (paper). No es asesoría financiera.")
+        result.title = "🕓 Cierre: sin órdenes para ejecutar"
+        result.message = "\n".join(lines)
+        if notify:
+            result.notified = await self.notifier.send(result.message, title=result.title,
+                                                       tags=["clock4"], priority=2)
+        await self.store.save_event("settle", payload={"executed": 0, "rejected": 0,
+                                                       "waiting": waiting,
+                                                       "notified": result.notified})
+
     def _pending_notes(self, pending: list[dict[str, Any]]) -> list[str]:
         if not pending:
             return []
@@ -428,12 +587,15 @@ class Bot:
     # LLM decision journal
     # ------------------------------------------------------------------
 
-    async def _todays_event(self, strategy: str, event_type: str, today: date) -> dict[str, Any] | None:
+    async def _todays_analysis(self, strategy: str, today: date, slot: str) -> dict[str, Any] | None:
+        """Today's analysis for this slot (decide or a given scan), so a re-run reuses it but a
+        scan never reuses the morning's call (or vice versa)."""
         assert self.store is not None
-        ev = await self.store.last_event(strategy, event_type)
-        if ev and datetime.fromisoformat(ev["occurred_at"]).astimezone(self.tz).date() == today:
-            payload: dict[str, Any] = ev["payload"]
-            return payload
+        start = datetime.combine(today, time(0), tzinfo=self.tz).astimezone(timezone.utc)
+        for ev in reversed(await self.store.events("analysis", since=start, strategy=strategy)):
+            if ev["payload"].get("slot", "decide") == slot:
+                payload: dict[str, Any] = ev["payload"]
+                return payload
         return None
 
     async def _score_recommendations(self, md: MarketData, today: date) -> None:
@@ -593,9 +755,45 @@ class Bot:
         if not report.is_filled or report.transaction is None:
             result.rejected.append((sig, report.rejection_reason))
             return None, report.rejection_reason
-        await self._record(report.transaction, tracker, persist=not dry_run)
-        result.executed.append(report.transaction)
-        return report.transaction, ""
+        tx = report.transaction
+        if self.binance is not None and asset.market == "CRYPTO" and not dry_run:
+            tx = await self._mirror_on_binance(tx, quote.price, result)
+        await self._record(tx, tracker, persist=not dry_run)
+        result.executed.append(tx)
+        return tx, ""
+
+    async def _mirror_on_binance(self, tx: Transaction, market_price: float,
+                                 result: CycleResult) -> Transaction:
+        """Send the crypto order to Binance Spot Testnet and book its real fill.
+
+        On any testnet problem (no keys, price drift, filters, balance) keep the simulated fill,
+        so the strategy's portfolio never diverges from its decisions; the reason is journaled."""
+        assert self.binance is not None
+        try:
+            fill = await self.binance.market_order(tx.ticker, tx.kind, tx.quantity, market_price)
+        except BinanceError as exc:
+            log.warning("binance.fallback_paper", ticker=tx.ticker, side=tx.kind, error=str(exc))
+            if self.store:
+                await self.store.save_event("error", strategy=tx.strategy, ticker=tx.ticker,
+                                            decision=tx.kind, reasoning=f"binance testnet: {exc}")
+                await self.store.save_event(
+                    "binance", strategy=tx.strategy, ticker=tx.ticker, decision=tx.kind,
+                    reasoning=str(exc), payload={"status": "fallback", "market_price": market_price,
+                                                 "quantity": tx.quantity, "paper_price": tx.price})
+            result.notes.append(f"⚠️ Binance testnet ({tx.ticker}): {str(exc)[:100]} → simulado")
+            return tx
+        if self.store:
+            await self.store.save_event(
+                "binance", strategy=tx.strategy, ticker=tx.ticker, decision=tx.kind,
+                payload={"status": "ok", "order_id": fill.order_id, "symbol": fill.symbol,
+                         "quantity": fill.quantity, "price": fill.avg_price, "fee": fill.fee,
+                         "market_price": market_price, "paper_price": tx.price,
+                         "deviation": fill.avg_price / market_price - 1 if market_price else None})
+        return tx.model_copy(update={  # realized P&L is computed by the tracker on apply
+            "quantity": fill.quantity, "price": fill.avg_price,
+            "gross": fill.quantity * fill.avg_price, "fee": fill.fee,
+            "rationale": f"{tx.rationale} [Binance testnet #{fill.order_id}]"[:500],
+        })
 
     async def _fund_buys(self, strategy: str, buys: list[Signal], tracker: PositionTracker,
                          md: MarketData, result: CycleResult, dry_run: bool) -> None:

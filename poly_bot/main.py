@@ -8,6 +8,7 @@ CLI entrypoint — `poly-bot` command.
   poly-bot positions           # current paper portfolio
   poly-bot trades              # recent transactions
   poly-bot notify-test         # send a test notification to ntfy
+  poly-bot binance             # check Binance Spot Testnet keys, prices and balances
 """
 
 from __future__ import annotations
@@ -204,6 +205,40 @@ def notify_test() -> None:
     ok = asyncio.run(bot.notifier.send("Si ves esto, las notificaciones funcionan ✅",
                                        title="🧪 Invest bot: prueba", tags=["test_tube"]))
     console.print("Enviado ✅" if ok else "[red]Falló el envío[/red]")
+
+
+@app.command()
+def binance() -> None:
+    """Check the Binance Spot Testnet connection: keys, crypto prices and testnet balances."""
+    from poly_bot.execution.binance_testnet import BinanceError, to_symbol
+
+    bot = _bot()
+    if bot.binance is None:
+        console.print("[yellow]Binance testnet desactivado: pon BINANCE_TESTNET_API_KEY y "
+                      "BINANCE_TESTNET_API_SECRET en .env y execution.binance_testnet.enabled: true"
+                      "[/yellow]")
+        raise typer.Exit(1)
+    client = bot.binance
+
+    async def _go() -> None:
+        try:
+            for a in bot.universe:
+                if a.market == "CRYPTO":
+                    sym = to_symbol(a.ticker)
+                    f = await client.filters(sym)
+                    console.print(f"{sym}: {await client.price(sym):,.2f} USDT · paso {f.step_size:g}"
+                                  f" · mínimo {f.min_notional:g} USDT")
+            bal = await client.balances()
+            console.print("Saldos testnet: " + ", ".join(
+                f"{k} {v:,.6g}" for k, v in sorted(bal.items()) if k in {"USDT", "BTC", "ETH", "SOL"}))
+            console.print("[green]Binance testnet OK ✅[/green]")
+        except BinanceError as exc:
+            console.print(f"[red]Binance testnet falló: {exc}[/red]")
+            raise typer.Exit(1)
+        finally:
+            await client.close()
+
+    asyncio.run(_go())
 
 
 if __name__ == "__main__":

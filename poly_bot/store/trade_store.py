@@ -219,13 +219,16 @@ class TradeStore:
 
     # ── Pending orders (next-open fills) ────────────────────────────────
 
-    async def supersede_pending(self, strategy: str) -> int:
-        """A new decision replaces any order the strategy still has waiting."""
-        cur = await self._conn.execute(
-            "UPDATE pending_orders SET status='superseded', note='reemplazada por una nueva decisión',"
-            " updated_at=? WHERE strategy=? AND status='pending'",
-            (utcnow().isoformat(), strategy),
-        )
+    async def supersede_pending(self, strategy: str, keep: set[int] | None = None) -> int:
+        """A new decision replaces any order the strategy still has waiting (except `keep`:
+        orders whose opening session already started, i.e. conceptually already filled)."""
+        sql = ("UPDATE pending_orders SET status='superseded', note='reemplazada por una nueva"
+               " decisión', updated_at=? WHERE strategy=? AND status='pending'")
+        args: list[Any] = [utcnow().isoformat(), strategy]
+        if keep:
+            sql += f" AND id NOT IN ({','.join('?' * len(keep))})"
+            args += sorted(keep)
+        cur = await self._conn.execute(sql, args)
         await self._conn.commit()
         return cur.rowcount or 0
 
