@@ -68,10 +68,11 @@ class PaperExecutor:
         slip = self.costs_for(asset).slippage_pct
         return quote.price * (1 + slip) if side == "BUY" else quote.price * (1 - slip)
 
-    def max_buy_quantity(self, asset: Asset, quote: Quote, cash: float) -> float:
+    def max_buy_quantity(self, asset: Asset, quote: Quote, cash: float,
+                         price: float | None = None) -> float:
         """Largest quantity whose gross + commission fits in `cash`."""
         c = self.costs_for(asset)
-        price = self.fill_price(asset, quote, "BUY")
+        price = price or self.fill_price(asset, quote, "BUY")
         qty = max(0.0, min(cash / (price * (1 + c.commission_pct)), (cash - c.min_commission) / price))
         return self._round_qty(qty, c)
 
@@ -82,7 +83,9 @@ class PaperExecutor:
         quote: Quote,
         cash_available: float,
         held_quantity: float = 0.0,
+        fill_price: float | None = None,
     ) -> ExecutionReport:
+        """`fill_price` (e.g. from a real order book) replaces quote × (1 ± slippage)."""
         def reject(reason: str) -> ExecutionReport:
             log.info("paper.order_rejected", ticker=request.ticker, side=request.side, reason=reason)
             return ExecutionReport(request=request, status="rejected", rejection_reason=reason)
@@ -91,7 +94,7 @@ class PaperExecutor:
             return reject(f"Currency mismatch {quote.currency} != {asset.currency}")
 
         c = self.costs_for(asset)
-        price = self.fill_price(asset, quote, request.side)
+        price = fill_price or self.fill_price(asset, quote, request.side)
 
         if request.quantity is not None:
             qty = request.quantity
@@ -115,7 +118,7 @@ class PaperExecutor:
         if request.side == "BUY":
             if gross + fee > cash_available + 1e-9:
                 # Shrink to what we can afford instead of rejecting outright
-                qty = self.max_buy_quantity(asset, quote, cash_available)
+                qty = self.max_buy_quantity(asset, quote, cash_available, fill_price)
                 if qty <= 0:
                     return reject(
                         f"Insufficient {asset.currency} cash: {cash_available:,.2f}"

@@ -30,8 +30,14 @@ execution:
                                 #            (cripto, 24/7, al precio actual) · close: todo al último cierre
   settle_time: "16:30"          # después del cierre: ejecuta las órdenes pendientes y envía un push
   pending_max_days: 3           # días hábiles sin apertura disponible (p. ej. festivo) antes de vencer
-  binance_testnet:              # cripto se envía como orden market real al Spot Testnet (dinero falso)
-    enabled: true               # requiere BINANCE_TESTNET_API_KEY/SECRET en .env; sin llaves → simulado
+  crypto_fill: orderbook        # orderbook: cripto se llena recorriendo el libro REAL de Binance (spread e
+                                #   impacto reales, datos públicos sin llaves) · model: slippage fijo
+  orderbook:
+    url: https://data-api.binance.vision   # endpoint de solo datos de Binance (accesible desde EE. UU.)
+    depth: 100                  # niveles por lado
+    max_deviation_pct: 0.02     # si el libro se aleja >2% de Yahoo → modelo de slippage fijo
+  binance_testnet:              # cripto se envía como orden market al Spot Testnet (dinero falso)
+    enabled: false              # apagado: Binance bloquea IPs de EE. UU. (el servidor está en us-east-1)
     max_deviation_pct: 0.02     # si el precio del testnet se aleja >2% del mercado real → simulado
 
 # --- Datos de mercado ---

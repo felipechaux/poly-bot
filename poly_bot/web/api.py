@@ -265,6 +265,22 @@ def create_app(bot: "Bot") -> FastAPI:
         out["orders"] = [{"occurred_at": e["occurred_at"], "strategy": e["strategy"],
                           "ticker": e["ticker"], "side": e["decision"], "reason": e["reasoning"],
                           **e["payload"]} for e in reversed(evs[-30:])]
+        # Real order-book fills (crypto_fill: orderbook)
+        fills = await _store().events("crypto_fill", since=since)
+        book = [f for f in fills if f["payload"].get("source") == "orderbook"]
+        def avg(key: str) -> float | None:
+            return sum(f["payload"][key] for f in book) / len(book) if book else None
+
+        saved = [f["payload"]["model_price"] / f["payload"]["vwap"] - 1 if f["decision"] == "BUY"
+                 else f["payload"]["vwap"] / f["payload"]["model_price"] - 1
+                 for f in book if f["payload"].get("model_price")]
+        out["crypto_fill"] = bot.crypto_fill
+        out["book_stats_30d"] = {"fills": len(book), "fallback": len(fills) - len(book),
+                                 "avg_impact_pct": avg("impact_pct"), "avg_spread_pct": avg("spread_pct"),
+                                 "avg_vs_model_pct": sum(saved) / len(saved) if saved else None}
+        out["book_fills"] = [{"occurred_at": f["occurred_at"], "strategy": f["strategy"],
+                              "ticker": f["ticker"], "side": f["decision"], "reason": f["reasoning"],
+                              **f["payload"]} for f in reversed(fills[-30:])]
         return out
 
     @app.get("/api/events")

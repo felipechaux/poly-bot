@@ -46,7 +46,12 @@ yfinance (cierres + dividendos + USD/COP)
   se ejecuta en el momento; BVC/EE. UU. quedan para la próxima apertura. Un escaneo solo agrega ideas
   (nunca cancela las órdenes de la mañana) y el tope de entradas nuevas por día cuenta para todas las
   corridas. Solo hay push si deciden algo. Cada escaneo cuesta 1 llamada a Claude + 1 a Gemini.
-- **Binance Spot Testnet** (`execution.binance_testnet`): con llaves del testnet en `.env`, las órdenes
+- **Llenados cripto con el libro real** (`execution.crypto_fill: orderbook`): cada orden cripto recorre
+  el libro de órdenes real de Binance (`data-api.binance.vision`, datos públicos sin llaves, accesible
+  desde EE. UU.) y se llena al precio promedio de los niveles que consume: spread e impacto reales en
+  vez de un slippage fijo. La comisión de 0,1% se sigue cobrando. Si el libro falla o se aleja >2% de
+  Yahoo, se usa el modelo fijo. Las posiciones se siguen valorando con Yahoo.
+- **Binance Spot Testnet** (`execution.binance_testnet`, apagado: Binance bloquea IPs de EE. UU.): con llaves del testnet en `.env`, las órdenes
   cripto se envían como órdenes market reales a testnet.binance.vision (dinero falso) y se registran
   con el precio, la cantidad y la comisión que devuelve Binance. Si el testnet falla o su precio se
   aleja más de 2% del mercado real, esa orden se simula como antes y el resumen lo avisa.
