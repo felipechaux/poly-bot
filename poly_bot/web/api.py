@@ -283,6 +283,14 @@ def create_app(bot: "Bot") -> FastAPI:
                               **f["payload"]} for f in reversed(fills[-30:])]
         return out
 
+    @app.get("/api/backtest")
+    async def backtest() -> dict[str, Any]:
+        """Last saved core backtest (`poly-bot backtest`), or ready=false."""
+        from poly_bot.analytics.backtest import load_result
+
+        res = load_result()
+        return {"ready": res is not None, **(res or {})}
+
     @app.get("/api/events")
     async def events(limit: int = 100) -> dict[str, Any]:
         return {"events": await _store().recent_events(limit=limit)}

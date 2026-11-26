@@ -62,6 +62,15 @@
     <div class="muted" id="equity-note"></div>
   </section>
 
+  <section class="card">
+    <h2>Backtest de la core <span class="muted" id="bt-sub"></span></h2>
+    <div class="table-wrap"><table id="bt-metrics"></table></div>
+    <div class="chart-box" style="margin-top:10px"><canvas id="bt-chart"></canvas></div>
+    <div class="table-wrap" style="margin-top:10px"><table id="bt-yearly"></table></div>
+    <div class="muted" id="bt-contrib" style="margin-top:8px"></div>
+    <div class="muted" id="bt-notes" style="margin-top:6px"></div>
+  </section>
+
   <section class="grid" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">
     <div class="card"><h2>Por clase</h2><div id="alloc-class"></div></div>
     <div class="card"><h2>Por región</h2><div id="alloc-region"></div></div>
@@ -131,7 +140,7 @@ const num = (v, d = 2) => v == null ? "—" : v.toLocaleString("en-US", { maximu
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const get = async (u) => (await fetch(u)).json();
 
-let universe = [], sortKey = "ret_3m", sortDir = -1, chart;
+let universe = [], sortKey = "ret_3m", sortDir = -1, chart, btChart;
 
 function kpis(p, s) {
   if (!p.ready) { $("kpis").innerHTML = '<div class="card">Esperando el primer ciclo…</div>'; return; }
@@ -200,6 +209,43 @@ function txs(rows) {
     <td>${t.quantity ? num(t.quantity, 4) : ""}</td><td>${t.price ? num(t.price) : ""}</td>
     <td>${money(t.gross, t.currency)}</td><td>${t.fee ? money(t.fee, t.currency) : ""}</td>
     <td>${venue(t)}</td></tr>`).join("");
+}
+
+function backtest(d) {
+  if (!d.ready) {
+    $("bt-sub").textContent = "· sin correr todavía";
+    $("bt-metrics").innerHTML = '<tr><td class="muted">Corre <code>poly-bot backtest --years 10</code> en el servidor para ver cómo le habría ido a la core.</td></tr>';
+    return;
+  }
+  const p = d.params || {};
+  $("bt-sub").textContent = `· ${p.years} años hasta ${p.last_day} · ${d.trades} operaciones · comisiones ${money(d.fees_base, "COP")}`;
+  const label = { core: "Core (COP)", core_usd: "Core (USD)" };
+  const keys = Object.keys(d.metrics).filter((k) => d.metrics[k] && d.metrics[k].start);
+  $("bt-metrics").innerHTML = "<tr><th></th><th>Total</th><th>Anual</th><th>Volatilidad</th><th>Peor caída</th><th>Sharpe</th></tr>" +
+    keys.map((k) => { const m = d.metrics[k]; return `<tr><td><b>${esc(label[k] || k.replace(".CL", ""))}</b>${label[k] ? "" : ' <span class="muted">comprar y mantener</span>'}</td>
+      <td class="${cls(m.total_return)}">${pct(m.total_return)}</td><td class="${cls(m.cagr)}">${pct(m.cagr)}</td>
+      <td>${pct(m.vol, false)}</td><td class="down" title="${esc(m.max_dd_peak)} → ${esc(m.max_dd_trough)}">${pct(m.max_drawdown)}</td>
+      <td>${m.sharpe == null ? "—" : m.sharpe.toFixed(2)}</td></tr>`; }).join("");
+  const cols = Object.keys(d.curve[0] || {}).filter((k) => k !== "day");
+  const palette = { core: "#5b8def" }, extra = ["#e2c35b", "#2fbf71", "#c07ef0"];
+  const data = { labels: d.curve.map((r) => r.day), datasets: cols.map((k, i) => ({
+    label: k === "core" ? "Core" : k.replace(".CL", ""), data: d.curve.map((r) => r[k]),
+    borderColor: palette[k] || extra[i % 3], borderDash: k === "core" ? [] : [4, 4],
+    pointRadius: 0, borderWidth: 2, tension: .2 })) };
+  if (btChart) { btChart.data = data; btChart.update(); }
+  else btChart = new Chart($("bt-chart"), { type: "line", data, options: {
+    responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
+    plugins: { legend: { labels: { color: "#8b92a3" } },
+               tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${money(c.parsed.y, "COP")}` } } },
+    scales: { x: { ticks: { color: "#8b92a3", maxTicksLimit: 8 }, grid: { color: "#262a33" } },
+              y: { ticks: { color: "#8b92a3", callback: (v) => "$" + (v / 1e6).toFixed(0) + "M" }, grid: { color: "#262a33" } } } } });
+  const yc = cols.filter((k) => k !== "core_usd");
+  $("bt-yearly").innerHTML = "<tr><th>Año</th>" + yc.map((k) => `<th>${k === "core" ? "Core" : esc(k.replace(".CL", ""))}</th>`).join("") + "</tr>" +
+    (d.yearly || []).slice().reverse().map((y) => `<tr><td>${y.year}</td>` +
+      yc.map((k) => `<td class="${cls(y[k])}">${pct(y[k])}</td>`).join("") + "</tr>").join("");
+  $("bt-contrib").innerHTML = "Aporte por activo (% del capital inicial): " + (d.contribution || [])
+    .map((c) => `${esc(c.ticker.replace(".CL", ""))} <span class="${cls(c.share_of_start)}">${pct(c.share_of_start)}</span>`).join(" · ");
+  $("bt-notes").innerHTML = (d.notes || []).map((n) => "• " + esc(n)).join("<br>");
 }
 
 function orderbook(d) {
@@ -343,6 +389,7 @@ async function refresh() {
     get("/api/llm").then(llm).catch(() => {});
     get("/api/orders").then(orders).catch(() => {});
     get("/api/binance").then((d) => { orderbook(d); binance(d); }).catch(() => {});
+    get("/api/backtest").then(backtest).catch(() => {});
   } catch (e) { console.error(e); }
 }
 
