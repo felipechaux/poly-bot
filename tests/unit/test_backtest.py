@@ -99,3 +99,40 @@ async def test_api_serves_the_saved_backtest(tmp_path, monkeypatch):
         assert "Backtest de la core" in client.get("/").text
     assert d["ready"] and d["metrics"]["core"]["cagr"] is not None and d["curve"]
     await bot._shutdown()
+
+
+def _first_day(h: History, years: int) -> pd.Timestamp:
+    end = h.frames["VT"].index[-1]
+    return next(d for d in DAYS if d >= end - pd.DateOffset(years=years))
+
+
+async def test_no_dividend_for_shares_bought_on_the_ex_date(tmp_path):
+    base, ex = history(), history()
+    for h in (base, ex):
+        h.frames["VT"]["Dividends"] = 0.0
+    ex.frames["VT"].loc[_first_day(ex, 1), "Dividends"] = 5.0  # the day of the initial buy
+    vt = lambda r: {c["ticker"]: c["pnl_cop"] for c in r.contribution}["VT"]  # noqa: E731
+    r0 = await run_backtest(bt_settings(tmp_path), years=1, history=base)
+    r1 = await run_backtest(bt_settings(tmp_path), years=1, history=ex)
+    assert vt(r1) == pytest.approx(vt(r0))
+
+
+async def test_dividend_goes_to_shares_held_at_the_previous_close(tmp_path):
+    base, ex = history(), history()
+    for h in (base, ex):
+        h.frames["VT"]["Dividends"] = 0.0
+    later = DAYS[DAYS.get_loc(_first_day(ex, 1)) + 10]
+    ex.frames["VT"].loc[later, "Dividends"] = 5.0
+    vt = lambda r: {c["ticker"]: c["pnl_cop"] for c in r.contribution}["VT"]  # noqa: E731
+    r0 = await run_backtest(bt_settings(tmp_path), years=1, history=base)
+    r1 = await run_backtest(bt_settings(tmp_path), years=1, history=ex)
+    assert vt(r1) > vt(r0)  # credited (net of 30% US withholding)
+
+
+async def test_start_capital_uses_the_starting_fx_rate(tmp_path):
+    h = history()
+    h.usdcop = pd.Series(np.linspace(4000, 6000, len(DAYS)), index=DAYS)
+    res = await run_backtest(bt_settings(tmp_path), years=1, history=h)
+    fx0 = float(h.usdcop[h.usdcop.index < _first_day(h, 1)].iloc[-1])
+    assert res.params["start_usdcop"] == pytest.approx(fx0)
+    assert res.params["start_capital_cop"] == pytest.approx(20_000_000 + 5_000 * fx0)

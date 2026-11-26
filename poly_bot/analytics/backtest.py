@@ -197,6 +197,7 @@ async def run_backtest(settings: "Settings", years: int = 10, share: float = 1.0
     curve_rows: list[tuple[pd.Timestamp, float, float]] = []
     trades, fees_base = 0, 0.0
     bt_today: date = days[0].date()
+    start_fx: float | None = None  # USD/COP on the first day, to value the initial capital
 
     for day in days:
         bt_today = day.date()
@@ -212,6 +213,28 @@ async def run_backtest(settings: "Settings", years: int = 10, share: float = 1.0
                 continue
             quotes[t] = Quote(ticker=t, price=prev[1], currency=asset.currency, as_of=prev[0].date())
         tracker.update_prices(quotes, usdcop)
+        if start_fx is None:
+            start_fx = usdcop
+
+        # Dividends with ex-date today go to what was held at the previous close, so they are
+        # credited before today's fills: a share bought on the ex-date does not get it.
+        for pos in list(tracker.snapshot().positions):
+            df = frames.get(pos.ticker)
+            if df is None or "Dividends" not in df or day not in df.index:
+                continue
+            amount = float(df.at[day, "Dividends"] or 0)
+            asset = universe.get(pos.ticker)
+            if amount > 0 and asset is not None:
+                gross = pos.quantity * amount
+                net = gross * (1 - withholding.get(asset.market, 0.0))
+                flows[pos.ticker] = flows.get(pos.ticker, 0.0) + tracker.snapshot().to(net, asset.currency, "COP")
+                tracker.apply(Transaction(kind="DIVIDEND", currency=asset.currency, ticker=pos.ticker,
+                                          quantity=pos.quantity, price=amount, gross=gross,
+                                          fee=gross * withholding.get(asset.market, 0.0),
+                                          strategy=pos.strategy,
+                                          occurred_at=datetime.combine(bt_today, datetime.min.time(),
+                                                                       tzinfo=timezone.utc)),
+                              quiet=True)
 
         ctx = DailyContext(today=bt_today, quotes=quotes, usdcop=usdcop, portfolio=tracker.snapshot(),
                            universe=universe, last_signal_date=last_signal)
@@ -239,25 +262,6 @@ async def run_backtest(settings: "Settings", years: int = 10, share: float = 1.0
                                        tx.currency, "COP")
                     flows[tx.ticker] = flows.get(tx.ticker, 0.0) + (-cash if tx.kind == "BUY" else cash)
 
-        # Dividends paid today on held positions
-        for pos in list(tracker.snapshot().positions):
-            df = frames.get(pos.ticker)
-            if df is None or "Dividends" not in df or day not in df.index:
-                continue
-            amount = float(df.at[day, "Dividends"] or 0)
-            asset = universe.get(pos.ticker)
-            if amount > 0 and asset is not None:
-                gross = pos.quantity * amount
-                net = gross * (1 - withholding.get(asset.market, 0.0))
-                flows[pos.ticker] = flows.get(pos.ticker, 0.0) + tracker.snapshot().to(net, asset.currency, "COP")
-                tracker.apply(Transaction(kind="DIVIDEND", currency=asset.currency, ticker=pos.ticker,
-                                          quantity=pos.quantity, price=amount, gross=gross,
-                                          fee=gross * withholding.get(asset.market, 0.0),
-                                          strategy=pos.strategy,
-                                          occurred_at=datetime.combine(bt_today, datetime.min.time(),
-                                                                       tzinfo=timezone.utc)),
-                              quiet=True)
-
         # Mark to market at today's close
         close_quotes = {t: q.model_copy(update={"price": float(frames[t].at[day, "Close"])})
                         for t, q in quotes.items() if day in frames[t].index}
@@ -269,7 +273,8 @@ async def run_backtest(settings: "Settings", years: int = 10, share: float = 1.0
     final = tracker.snapshot()
     for p in final.positions:
         flows[p.ticker] = flows.get(p.ticker, 0.0) + final.value_of(p.ticker, "COP")
-    start_total = final.to(sum(final.to(v, k, "COP") for k, v in settings.initial_cash.items()), "COP", "COP")
+    fx0 = start_fx or final.usdcop
+    start_total = sum(v * (fx0 if k == "USD" else 1.0) for k, v in settings.initial_cash.items())
     contribution: list[dict[str, Any]] = [
         {"ticker": t, "pnl_cop": v, "share_of_start": v / start_total if start_total else None}
         for t, v in sorted(flows.items(), key=lambda kv: -kv[1])]
@@ -313,10 +318,13 @@ async def run_backtest(settings: "Settings", years: int = 10, share: float = 1.0
 
     notes.append("BVC: yfinance suele repetir el cierre como apertura; en esos días se llena al "
                  "cierre del día de ejecución (después de la decisión).")
+    notes.append("Benchmarks: comprar y mantener sin costos, con dividendos reinvertidos sin la "
+                 "retención de 30% que sí paga la core en EE. UU. (la comparación no favorece a la core).")
     notes.append("Sin impuestos. TRM de Yahoo (COP=X). Sharpe con tasa libre de riesgo 0.")
     res = BacktestResult(
         params={"years": years, "share": share, "targets": strategy.targets,
                 "drift_band": strategy.drift_band, "initial_cash": settings.initial_cash,
+                "start_capital_cop": start_total, "start_usdcop": fx0,
                 "fill": "apertura del día siguiente a la decisión",
                 "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "last_day": str(bt_today)},
