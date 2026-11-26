@@ -41,6 +41,8 @@
   .pill.bajista { background:#3a1a1c; color:var(--down); }
   .pill.mixta { background:#33301a; color:#e2c35b; }
   .chart-box { position:relative; height:260px; }
+  .pill.binance { background:#3a3215; color:#f0b90b; }
+  .pill.sim { background:#24304a; color:#a9c2ff; }
 </style>
 </head>
 <body>
@@ -93,6 +95,12 @@
     <h2>Órdenes a la apertura</h2>
     <p class="muted" id="orders-note"></p>
     <div class="table-wrap"><table id="orders"></table></div>
+  </section>
+
+  <section class="card">
+    <h2>Binance Spot Testnet <span class="muted">· cripto con dinero falso</span></h2>
+    <section class="grid" id="bn-kpis"></section>
+    <div class="table-wrap" style="margin-top:10px"><table id="bn-orders"></table></div>
   </section>
 
   <section class="card">
@@ -170,13 +178,49 @@ function renderUniverse() {
   });
 }
 
+function venue(t) {
+  const crypto = universe.some((a) => a.ticker === t.ticker && a.market === "CRYPTO");
+  if (!crypto || (t.kind !== "BUY" && t.kind !== "SELL")) return "";
+  const m = /\[Binance testnet #(\d+)\]/.exec(t.rationale || "");
+  return m ? `<span class="pill binance">Binance #${m[1]}</span>` : '<span class="pill sim">Simulado</span>';
+}
+
 function txs(rows) {
-  const head = "<tr><th>Fecha</th><th>Tipo</th><th>Ticker</th><th>Cant.</th><th>Precio</th><th>Monto</th><th>Comisión</th></tr>";
+  const head = "<tr><th>Fecha</th><th>Tipo</th><th>Ticker</th><th>Cant.</th><th>Precio</th><th>Monto</th><th>Comisión</th><th>Ejecución</th></tr>";
   $("txs").innerHTML = head + rows.map((t) => `<tr title="${esc(t.rationale)}">
     <td>${esc(t.occurred_at.slice(0, 10))}</td><td>${t.kind}</td>
     <td>${esc(t.ticker || (t.kind === "FX" ? t.from_currency + "→" + t.currency : ""))}</td>
     <td>${t.quantity ? num(t.quantity, 4) : ""}</td><td>${t.price ? num(t.price) : ""}</td>
-    <td>${money(t.gross, t.currency)}</td><td>${t.fee ? money(t.fee, t.currency) : ""}</td></tr>`).join("");
+    <td>${money(t.gross, t.currency)}</td><td>${t.fee ? money(t.fee, t.currency) : ""}</td>
+    <td>${venue(t)}</td></tr>`).join("");
+}
+
+function binance(d) {
+  const state = { on: '<span class="up">● conectado</span>', no_keys: '<span class="down">● sin llaves</span>',
+                  off: '<span class="muted">● apagado</span>' }[d.state] || esc(d.state);
+  const bal = d.balances ? Object.entries(d.balances).map(([k, v]) => `${esc(k)} ${num(v, k === "USDT" ? 2 : 6)}`).join("<br>") : "—";
+  const st = d.stats_30d || {};
+  const cards = [
+    ["Estado", d.error ? `<span class="down">● error</span>` : state,
+      d.error ? esc(d.error) : d.state === "no_keys" ? "Faltan BINANCE_TESTNET_API_KEY/SECRET en .env" :
+      d.state === "off" ? "execution.binance_testnet.enabled: false" : "Órdenes cripto → testnet.binance.vision"],
+    ["Saldos testnet", bal],
+    ["Órdenes 30 días", `${st.ok || 0} <span class="muted">en Binance</span>`,
+      `${st.fallback || 0} simuladas por fallo`],
+    ["Desvío vs mercado", st.avg_abs_deviation == null ? "—" : pct(st.avg_abs_deviation, false),
+      "promedio |Binance − Yahoo|"],
+  ];
+  $("bn-kpis").innerHTML = cards.map(([k, v, sub]) =>
+    `<div class="card kpi"><div class="muted">${k}</div><div class="v" style="font-size:15px">${v}</div>${sub ? `<div class="muted">${sub}</div>` : ""}</div>`).join("");
+  const rows = d.orders || [];
+  $("bn-orders").innerHTML = rows.length ? "<tr><th>Fecha</th><th>Orden</th><th>Cant.</th><th>Binance</th><th>Mercado</th><th>Desvío</th><th>Comisión</th><th>Estado</th></tr>" +
+    rows.map((o) => `<tr><td>${esc(new Date(o.occurred_at).toLocaleString("es-CO"))}</td>
+      <td><b>${o.side === "BUY" ? "Compra" : "Venta"} ${esc(o.ticker)}</b> <span class="muted">${esc(o.strategy)}</span></td>
+      <td>${num(o.quantity, 6)}</td><td>${o.price ? num(o.price) : "—"}</td><td>${num(o.market_price)}</td>
+      <td class="${o.deviation == null ? "" : Math.abs(o.deviation) > 0.01 ? "down" : ""}">${o.deviation == null ? "—" : pct(o.deviation)}</td>
+      <td>${o.fee ? "US$ " + num(o.fee, 4) : "—"}</td>
+      <td>${o.status === "ok" ? `<span class="pill binance">#${o.order_id}</span>` : `<span class="pill sim" title="${esc(o.reason)}">simulado</span> <span class="muted">${esc((o.reason || "").slice(0, 60))}</span>`}</td></tr>`).join("")
+    : '<tr><td class="muted">Sin órdenes cripto en el testnet todavía.</td></tr>';
 }
 
 function equity(snaps) {
@@ -257,7 +301,9 @@ async function refresh() {
     const [s, p, pos, u, eq, t] = await Promise.all([get("/api/status"), get("/api/portfolio"),
       get("/api/positions"), get("/api/universe"), get("/api/equity"), get("/api/transactions?limit=100")]);
     $("mode").textContent = s.mode;
-    $("next").textContent = s.next_run_at ? (s.next_job === "settle" ? "Próxima ejecución de órdenes: " : "Próxima decisión: ") + new Date(s.next_run_at).toLocaleString("es-CO") : "";
+    const jobLabel = s.next_job === "settle" ? "Próxima ejecución de órdenes: "
+      : (s.next_job || "").startsWith("scan:") ? "Próximo escaneo (" + s.next_job.slice(5) + "): " : "Próxima decisión: ";
+    $("next").textContent = s.next_run_at ? jobLabel + new Date(s.next_run_at).toLocaleString("es-CO") : "";
     if (s.last_cycle) $("summary").textContent = s.last_cycle.title + "\n\n" + s.last_cycle.message;
     universe = u.assets;
     const regions = [...new Set(universe.map((a) => a.region))].sort();
@@ -267,6 +313,7 @@ async function refresh() {
     equity(eq.snapshots); txs(t.transactions);
     get("/api/llm").then(llm).catch(() => {});
     get("/api/orders").then(orders).catch(() => {});
+    get("/api/binance").then(binance).catch(() => {});
   } catch (e) { console.error(e); }
 }
 

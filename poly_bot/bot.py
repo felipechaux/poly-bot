@@ -108,8 +108,10 @@ class Bot:
         self.scans: list[Scan] = Scan.parse(settings.schedule.get("scans"))
         bn = ex.get("binance_testnet") or {}
         self.binance: BinanceTestnet | None = None
-        if bn.get("enabled") and settings.binance_testnet_api_key \
-                and settings.binance_testnet_api_secret:
+        has_keys = bool(settings.binance_testnet_api_key and settings.binance_testnet_api_secret)
+        # off: disabled in config · no_keys: enabled but .env lacks keys · on: mirroring
+        self.binance_state = "off" if not bn.get("enabled") else "on" if has_keys else "no_keys"
+        if self.binance_state == "on":
             self.binance = BinanceTestnet(
                 settings.binance_testnet_api_key, settings.binance_testnet_api_secret,
                 base_url=str(bn.get("base_url", "https://testnet.binance.vision")),
@@ -774,8 +776,19 @@ class Bot:
             if self.store:
                 await self.store.save_event("error", strategy=tx.strategy, ticker=tx.ticker,
                                             decision=tx.kind, reasoning=f"binance testnet: {exc}")
+                await self.store.save_event(
+                    "binance", strategy=tx.strategy, ticker=tx.ticker, decision=tx.kind,
+                    reasoning=str(exc), payload={"status": "fallback", "market_price": market_price,
+                                                 "quantity": tx.quantity, "paper_price": tx.price})
             result.notes.append(f"⚠️ Binance testnet ({tx.ticker}): {str(exc)[:100]} → simulado")
             return tx
+        if self.store:
+            await self.store.save_event(
+                "binance", strategy=tx.strategy, ticker=tx.ticker, decision=tx.kind,
+                payload={"status": "ok", "order_id": fill.order_id, "symbol": fill.symbol,
+                         "quantity": fill.quantity, "price": fill.avg_price, "fee": fill.fee,
+                         "market_price": market_price, "paper_price": tx.price,
+                         "deviation": fill.avg_price / market_price - 1 if market_price else None})
         return tx.model_copy(update={  # realized P&L is computed by the tracker on apply
             "quantity": fill.quantity, "price": fill.avg_price,
             "gross": fill.quantity * fill.avg_price, "fee": fill.fee,

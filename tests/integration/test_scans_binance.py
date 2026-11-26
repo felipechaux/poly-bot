@@ -177,6 +177,11 @@ def fake_binance(price: float) -> tuple[BinanceTestnet, list[dict[str, list[str]
             return httpx.Response(200, json={"symbols": [{"symbol": "BTCUSDT", "filters": [
                 {"filterType": "LOT_SIZE", "stepSize": "0.00001", "minQty": "0.00001"},
                 {"filterType": "NOTIONAL", "minNotional": "5"}]}]})
+        if path == "/api/v3/account":
+            assert "signature" in q
+            return httpx.Response(200, json={"balances": [
+                {"asset": "USDT", "free": "9000", "locked": "0"}, {"asset": "BTC", "free": "1.02", "locked": "0"},
+                {"asset": "XRP", "free": "5", "locked": "0"}]})
         if path == "/api/v3/ticker/price":
             return httpx.Response(200, json={"symbol": "BTCUSDT", "price": str(price)})
         if path == "/api/v3/order":
@@ -205,6 +210,18 @@ async def test_crypto_orders_fill_on_binance_testnet(tmp_path):
     assert round(btc.quantity, 5) == btc.quantity  # testnet lot size respected
     vt = next(t for t in r.executed if t.ticker == "VT")
     assert "Binance" not in vt.rationale  # stocks stay simulated
+
+    from fastapi.testclient import TestClient
+
+    from poly_bot.web.api import create_app
+    bot.binance_state = "on"
+    with TestClient(create_app(bot)) as client:
+        d = client.get("/api/binance").json()
+        assert "Binance Spot Testnet" in client.get("/").text
+    assert d["state"] == "on" and d["balances"] == {"USDT": 9000.0, "BTC": 1.02}
+    assert d["stats_30d"]["ok"] == 1 and d["stats_30d"]["fallback"] == 0
+    [o] = d["orders"]
+    assert o["order_id"] == 42 and o["market_price"] == 50_000 and abs(o["deviation"] - 0.002) < 1e-9
     await bot._shutdown()
 
 
@@ -217,4 +234,6 @@ async def test_testnet_price_drift_falls_back_to_paper(tmp_path):
     assert "Binance testnet" in r.message
     errors = await bot.store.events("error")  # type: ignore[union-attr]
     assert "se aleja" in errors[-1]["reasoning"]
+    [ev] = await bot.store.events("binance")  # type: ignore[union-attr]
+    assert ev["payload"]["status"] == "fallback" and "se aleja" in ev["reasoning"]
     await bot._shutdown()

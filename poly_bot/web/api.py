@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -236,6 +236,36 @@ def create_app(bot: "Bot") -> FastAPI:
                 "pending": await store.pending_orders(),
                 "recent": [o for o in await store.pending_orders(status=None, limit=limit)
                            if o["status"] != "pending"]}
+
+    binance_cache: dict[str, Any] = {"at": 0.0, "balances": None, "error": None}
+
+    @app.get("/api/binance")
+    async def binance() -> dict[str, Any]:
+        """Binance Spot Testnet: state, live testnet balances (cached 60 s) and mirrored orders."""
+        from poly_bot.execution.binance_testnet import BinanceError
+
+        out: dict[str, Any] = {"state": bot.binance_state, "balances": None, "error": None}
+        if bot.binance is not None:
+            now = datetime.now(timezone.utc).timestamp()
+            if now - binance_cache["at"] > 60:
+                try:
+                    bal = await bot.binance.balances()
+                    binance_cache.update(balances={k: v for k, v in bal.items()
+                                                   if k in {"USDT", "BTC", "ETH", "SOL"}}, error=None)
+                except BinanceError as exc:
+                    binance_cache.update(balances=None, error=str(exc))
+                binance_cache["at"] = now
+            out.update(balances=binance_cache["balances"], error=binance_cache["error"])
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        evs = await _store().events("binance", since=since)
+        ok = [e for e in evs if e["payload"].get("status") == "ok"]
+        devs = [abs(e["payload"]["deviation"]) for e in ok if e["payload"].get("deviation") is not None]
+        out["stats_30d"] = {"ok": len(ok), "fallback": len(evs) - len(ok),
+                            "avg_abs_deviation": sum(devs) / len(devs) if devs else None}
+        out["orders"] = [{"occurred_at": e["occurred_at"], "strategy": e["strategy"],
+                          "ticker": e["ticker"], "side": e["decision"], "reason": e["reasoning"],
+                          **e["payload"]} for e in reversed(evs[-30:])]
+        return out
 
     @app.get("/api/events")
     async def events(limit: int = 100) -> dict[str, Any]:
