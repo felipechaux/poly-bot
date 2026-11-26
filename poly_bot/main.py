@@ -9,6 +9,7 @@ CLI entrypoint — `poly-bot` command.
   poly-bot trades              # recent transactions
   poly-bot notify-test         # send a test notification to ntfy
   poly-bot binance             # check Binance Spot Testnet keys, prices and balances
+  poly-bot backtest --years 10 # backtest the core allocation (saved for the dashboard)
 """
 
 from __future__ import annotations
@@ -239,6 +240,44 @@ def binance() -> None:
             await client.close()
 
     asyncio.run(_go())
+
+
+@app.command()
+def backtest(
+    years: int = typer.Option(10, "--years", "-y", help="Years of history"),
+    share: float = typer.Option(1.0, "--share", help="Core portfolio_share (1.0 = 100% core)"),
+    save: bool = typer.Option(True, "--save/--no-save", help="Save to data/backtest.json"),
+) -> None:
+    """Backtest the core allocation with live costs and next-open fills."""
+    from poly_bot.analytics.backtest import run_backtest, save_result
+    from poly_bot.config.settings import get_settings
+
+    settings = get_settings()
+    setup_logging(level="WARNING", fmt=settings.log_format)
+    res = asyncio.run(run_backtest(settings, years=years, share=share))
+    if save:
+        save_result(res)
+
+    table = Table(title=f"Backtest core · {years} años · fills a la apertura")
+    for col in ("", "Rent. total", "Anual (CAGR)", "Volatilidad", "Peor caída", "Sharpe"):
+        table.add_column(col, justify="right")
+    labels = {"core": "Core (COP)", "core_usd": "Core (USD)"}
+    for k, m in res.metrics.items():
+        if not m:
+            continue
+        table.add_row(labels.get(k, f"{k} (comprar y mantener)"), _pct(m["total_return"]), _pct(m["cagr"]),
+                      f"{m['vol'] * 100:.1f}%" if m["vol"] else "—", _pct(m["max_drawdown"]),
+                      f"{m['sharpe']:.2f}" if m["sharpe"] is not None else "—")
+    console.print(table)
+    core = res.metrics.get("core", {})
+    if core:
+        console.print(f"Peor caída: {core['max_dd_peak']} → {core['max_dd_trough']} · operaciones: {res.trades}"
+                      f" · comisiones: $ {res.fees_base:,.0f} COP")
+    if res.contribution:
+        console.print("Aporte por activo (COP, % del capital inicial): " + " · ".join(
+            f"{c['ticker']} {c['share_of_start'] * 100:+.0f}%" for c in res.contribution))
+    for n in res.notes:
+        console.print(f"[dim]• {n}[/dim]")
 
 
 if __name__ == "__main__":
