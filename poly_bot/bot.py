@@ -39,6 +39,7 @@ from poly_bot.execution.binance_testnet import BinanceError, BinanceTestnet
 from poly_bot.execution.models import OrderRequest, Transaction
 from poly_bot.execution.paper_executor import PaperExecutor
 from poly_bot.execution.sessions import fills_at_open, next_open_fill, next_session_open
+from poly_bot.market_data.orderbook import BookFill, OrderBook, OrderBookError
 from poly_bot.market_data.provider import MarketData, PriceProvider, YFinanceProvider
 from poly_bot.market_data.universe import Universe
 from poly_bot.notify.ntfy import NtfyNotifier
@@ -111,6 +112,14 @@ class Bot:
         has_keys = bool(settings.binance_testnet_api_key and settings.binance_testnet_api_secret)
         # off: disabled in config · no_keys: enabled but .env lacks keys · on: mirroring
         self.binance_state = "off" if not bn.get("enabled") else "on" if has_keys else "no_keys"
+        # crypto_fill: orderbook → walk Binance's real book (public data) · model → fixed slippage
+        ob = ex.get("orderbook") or {}
+        self.crypto_fill = str(ex.get("crypto_fill", "model"))
+        self.orderbook: OrderBook | None = OrderBook(
+            base_url=str(ob.get("url", "https://data-api.binance.vision")),
+            depth=int(ob.get("depth", 100)),
+            max_deviation_pct=float(ob.get("max_deviation_pct", 0.02)),
+        ) if self.crypto_fill == "orderbook" else None
         if self.binance_state == "on":
             self.binance = BinanceTestnet(
                 settings.binance_testnet_api_key, settings.binance_testnet_api_secret,
@@ -207,6 +216,8 @@ class Bot:
             await s.on_stop()
         if self.binance is not None:
             await self.binance.close()
+        if self.orderbook is not None:
+            await self.orderbook.close()
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
@@ -747,20 +758,55 @@ class Bot:
                                             decision=sig.side, reasoning=reason)
             return None, reason
         asset = self.universe.require(sig.ticker)
+        book: BookFill | None = None
+        if self.orderbook is not None and asset.market == "CRYPTO":
+            book = await self._book_fill(sig, quote.price, tracker, result, dry_run)
         report = self.executor.execute(
             req, asset, quote,
             cash_available=max(0.0, tracker.cash.get(asset.currency, 0.0)),
             held_quantity=tracker.held_quantity(sig.ticker),
+            fill_price=book.vwap if book else None,
         )
         if not report.is_filled or report.transaction is None:
             result.rejected.append((sig, report.rejection_reason))
             return None, report.rejection_reason
         tx = report.transaction
+        if book is not None:
+            tx = tx.model_copy(update={"rationale": (
+                f"{tx.rationale} [libro Binance: {book.levels} niveles, impacto "
+                f"{book.impact_pct * 1e4:.1f} pb]")[:500]})
+            if not dry_run and self.store:
+                await self.store.save_event(
+                    "crypto_fill", strategy=strategy, ticker=sig.ticker, decision=sig.side,
+                    payload={"source": "orderbook", "quantity": tx.quantity, "vwap": book.vwap,
+                             "mid": book.mid, "best": book.best, "spread_pct": book.spread_pct,
+                             "impact_pct": book.impact_pct, "levels": book.levels,
+                             "market_price": quote.price,
+                             "model_price": self.executor.fill_price(asset, quote, sig.side)})
         if self.binance is not None and asset.market == "CRYPTO" and not dry_run:
             tx = await self._mirror_on_binance(tx, quote.price, result)
         await self._record(tx, tracker, persist=not dry_run)
         result.executed.append(tx)
         return tx, ""
+
+    async def _book_fill(self, sig: Signal, market_price: float, tracker: PositionTracker,
+                         result: CycleResult, dry_run: bool) -> BookFill | None:
+        """VWAP of a market order of this size on Binance's live book, or None (→ fixed-slippage
+        model) if the book is unavailable, too thin or far from the reference price."""
+        assert self.orderbook is not None
+        qty = sig.quantity if sig.quantity is not None else (sig.value or 0) / market_price
+        if sig.side == "SELL":
+            qty = min(qty, tracker.held_quantity(sig.ticker))
+        try:
+            return await self.orderbook.fill(sig.ticker, sig.side, qty, market_price)
+        except OrderBookError as exc:
+            log.warning("orderbook.fallback_model", ticker=sig.ticker, error=str(exc))
+            if not dry_run and self.store:
+                await self.store.save_event("crypto_fill", ticker=sig.ticker, decision=sig.side,
+                                            reasoning=str(exc), payload={"source": "model",
+                                                                         "market_price": market_price})
+            result.notes.append(f"⚠️ Libro de Binance ({sig.ticker}): {str(exc)[:100]} → modelo")
+            return None
 
     async def _mirror_on_binance(self, tx: Transaction, market_price: float,
                                  result: CycleResult) -> Transaction:

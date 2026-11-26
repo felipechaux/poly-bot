@@ -98,9 +98,13 @@
   </section>
 
   <section class="card">
-    <h2>Binance Spot Testnet <span class="muted">· cripto con dinero falso</span></h2>
-    <section class="grid" id="bn-kpis"></section>
-    <div class="table-wrap" style="margin-top:10px"><table id="bn-orders"></table></div>
+    <h2>Ejecución cripto <span class="muted">· libro de órdenes real de Binance</span></h2>
+    <section class="grid" id="ob-kpis"></section>
+    <div class="table-wrap" style="margin-top:10px"><table id="ob-fills"></table></div>
+    <details style="margin-top:12px"><summary class="muted">Binance Spot Testnet</summary>
+      <section class="grid" id="bn-kpis" style="margin-top:10px"></section>
+      <div class="table-wrap" style="margin-top:10px"><table id="bn-orders"></table></div>
+    </details>
   </section>
 
   <section class="card">
@@ -182,7 +186,10 @@ function venue(t) {
   const crypto = universe.some((a) => a.ticker === t.ticker && a.market === "CRYPTO");
   if (!crypto || (t.kind !== "BUY" && t.kind !== "SELL")) return "";
   const m = /\[Binance testnet #(\d+)\]/.exec(t.rationale || "");
-  return m ? `<span class="pill binance">Binance #${m[1]}</span>` : '<span class="pill sim">Simulado</span>';
+  if (m) return `<span class="pill binance">Testnet #${m[1]}</span>`;
+  const b = /\[libro Binance: (\d+) niveles, impacto ([\d.-]+) pb\]/.exec(t.rationale || "");
+  return b ? `<span class="pill binance" title="${b[1]} niveles del libro">Libro real · ${b[2]} pb</span>`
+           : '<span class="pill sim">Modelo</span>';
 }
 
 function txs(rows) {
@@ -193,6 +200,28 @@ function txs(rows) {
     <td>${t.quantity ? num(t.quantity, 4) : ""}</td><td>${t.price ? num(t.price) : ""}</td>
     <td>${money(t.gross, t.currency)}</td><td>${t.fee ? money(t.fee, t.currency) : ""}</td>
     <td>${venue(t)}</td></tr>`).join("");
+}
+
+function orderbook(d) {
+  const st = d.book_stats_30d || {};
+  const bp = (x) => x == null ? "—" : (x * 1e4).toFixed(1) + " pb";
+  const mode = d.crypto_fill === "orderbook" ? '<span class="up">● libro real</span>' : '<span class="muted">● modelo fijo</span>';
+  const cards = [
+    ["Llenado", mode, d.crypto_fill === "orderbook" ? "data-api.binance.vision · datos públicos" : "slippage fijo de config"],
+    ["Llenados 30 días", `${st.fills || 0}`, `${st.fallback || 0} con modelo por falla del libro`],
+    ["Impacto promedio", bp(st.avg_impact_pct), `spread ${bp(st.avg_spread_pct)}`],
+    ["vs modelo fijo", st.avg_vs_model_pct == null ? "—" : `<span class="${cls(st.avg_vs_model_pct)}">${pct(st.avg_vs_model_pct)}</span>`,
+      "+ = el libro real fue más barato"],
+  ];
+  $("ob-kpis").innerHTML = cards.map(([k, v, sub]) =>
+    `<div class="card kpi"><div class="muted">${k}</div><div class="v" style="font-size:15px">${v}</div>${sub ? `<div class="muted">${sub}</div>` : ""}</div>`).join("");
+  const rows = d.book_fills || [];
+  $("ob-fills").innerHTML = rows.length ? "<tr><th>Fecha</th><th>Orden</th><th>Cant.</th><th>Precio libro</th><th>Mid</th><th>Yahoo</th><th>Impacto</th><th>Niveles</th></tr>" +
+    rows.map((o) => `<tr><td>${esc(new Date(o.occurred_at).toLocaleString("es-CO"))}</td>
+      <td><b>${o.side === "BUY" ? "Compra" : "Venta"} ${esc(o.ticker)}</b> <span class="muted">${esc(o.strategy)}</span></td>
+      ${o.source === "orderbook" ? `<td>${num(o.quantity, 6)}</td><td>${num(o.vwap)}</td><td>${num(o.mid)}</td><td>${num(o.market_price)}</td>
+      <td>${bp(o.impact_pct)}</td><td>${o.levels}</td>` : `<td colspan="6" class="muted">modelo fijo: ${esc((o.reason || "").slice(0, 80))}</td>`}</tr>`).join("")
+    : '<tr><td class="muted">Sin órdenes cripto todavía.</td></tr>';
 }
 
 function binance(d) {
@@ -313,7 +342,7 @@ async function refresh() {
     equity(eq.snapshots); txs(t.transactions);
     get("/api/llm").then(llm).catch(() => {});
     get("/api/orders").then(orders).catch(() => {});
-    get("/api/binance").then(binance).catch(() => {});
+    get("/api/binance").then((d) => { orderbook(d); binance(d); }).catch(() => {});
   } catch (e) { console.error(e); }
 }
 
